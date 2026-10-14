@@ -44,10 +44,22 @@ public enum RainError: Error, LocalizedError, Equatable {
 
   /// RAIN_302: The transaction was accepted by the wallet provider but its hash was not yet
   /// visible when status polling stopped. NOT a failure — the transaction may still confirm, and
-  /// resending it risks a duplicate transfer. Resume polling with `statusId` instead.
+  /// resending it risks a duplicate transfer. Resume polling with `statusId` instead. On a
+  /// Turnkey / Rain wallet send whose activity the backend accepted without a readable status
+  /// id yet, `statusId` is the backend's ACTIVITY id — no SDK call takes it, but it matches the
+  /// history row for the send. Same code and meaning on Android.
   case transactionPending(statusId: String)
 
-  
+  /// RAIN_305: The send was handed to the wallet provider and the SDK then lost track of it — a
+  /// server error, a transport failure or an unreadable answer AFTER the provider may already have
+  /// accepted it — so there is no identifier to resume from. NOT a settled failure: the
+  /// transaction may still land, and resending risks a duplicate transfer. Read history or the
+  /// balance before sending again. Carries no cause on purpose, so no layer can read an HTTP
+  /// status off it and retry. (RAIN_303/304 were retired; the 3xx sequence resumes here, as on
+  /// Android.)
+  case transactionOutcomeUnknown(details: String)
+
+
   // MARK: - 4xx: User Action Errors
   
   /// RAIN_401: The user manually cancelled the signature request within the wallet UI
@@ -124,6 +136,8 @@ public enum RainError: Error, LocalizedError, Equatable {
       return "RAIN_301"
     case .transactionPending:
       return "RAIN_302"
+    case .transactionOutcomeUnknown:
+      return "RAIN_305"
     case .userRejected:
       return "RAIN_401"
     case .insufficientFunds, .insufficientTokenBalance, .tokenAccountNotFound:
@@ -169,6 +183,8 @@ public enum RainError: Error, LocalizedError, Equatable {
       return "[\(code)] Connectivity issues preventing communication with APIs or Blockchain nodes. \(underlying.localizedDescription)"
     case .transactionPending(let statusId):
       return "[\(code)] Transaction submitted but not yet confirmed (statusId=\(statusId)). Not a failure — resume polling with the status id; do not resend."
+    case .transactionOutcomeUnknown(let details):
+      return "[\(code)] \(details). The send may still land — check history or the balance before sending again; do not resend blindly."
     case .userRejected:
       return "[\(code)] The user manually cancelled the signature request within the wallet UI."
     case .insufficientFunds(let required, let available):
@@ -213,6 +229,7 @@ extension RainError {
     case .invalidLoginCode: return "invalidLoginCode"
     case .networkError: return "networkError"
     case .transactionPending: return "transactionPending"
+    case .transactionOutcomeUnknown: return "transactionOutcomeUnknown"
     case .userRejected: return "userRejected"
     case .insufficientFunds: return "insufficientFunds"
     case .transactionSimulationFailed: return "transactionSimulationFailed"
