@@ -3,6 +3,7 @@ import Combine
 import Foundation
 @_spi(RainAdapter) @testable import RainCore
 @testable import RainTurnkey
+import TurnkeyHttp
 import TurnkeySwift
 import TurnkeyTypes
 
@@ -204,6 +205,50 @@ final class MockTurnkeyClient: TurnkeyClientProtocol {
       ActivitiesResponseFixture(activities: mockActivities),
       as: TGetActivitiesResponse.self
     )
+  }
+
+  // MARK: Activity by id (accepted-but-unfinished sends)
+
+  /// Sequential answers to `getActivity`; the last entry is reused once consumed. Empty: the
+  /// activity is looked up in `mockActivities` by id, and a miss throws.
+  var activityByIdQueue: [v1Activity] = []
+  var getActivityCalls: [TGetActivityBody] = []
+  var getActivityError: Error?
+
+  func getActivity(
+    _ input: TGetActivityBody
+  ) async throws -> TGetActivityResponse {
+    getActivityCalls.append(input)
+    if let getActivityError { throw getActivityError }
+    let activity: v1Activity
+    if activityByIdQueue.isEmpty {
+      guard let found = mockActivities.first(where: { $0.id == input.activityId }) else {
+        throw TurnkeyRequestError.apiError(statusCode: 404, payload: nil)
+      }
+      activity = found
+    } else if activityByIdQueue.count == 1 {
+      activity = activityByIdQueue[0]
+    } else {
+      activity = activityByIdQueue.removeFirst()
+    }
+    return MockTurnkey.decode(ActivityResponseFixture(activity: activity), as: TGetActivityResponse.self)
+  }
+
+  /// The error the real vendor client throws for a send whose activity is not COMPLETED after
+  /// its poll (swift-sdk 4.0.0): it decodes the raw `{activity}` answer into the typed response,
+  /// whose `sendTransactionStatusId` is non-optional, and `JSONDecoder` fails. Built the same
+  /// way so the adapter is exercised against the genuine error shape.
+  static func activityNotCompletedError(_ activity: v1Activity, kind: TurnkeySendKind) -> Error {
+    let data = try! JSONEncoder().encode(ActivityResponseFixture(activity: activity))
+    do {
+      switch kind {
+      case .evm: _ = try JSONDecoder().decode(TEthSendTransactionResponse.self, from: data)
+      case .solana: _ = try JSONDecoder().decode(TSolSendTransactionResponse.self, from: data)
+      }
+      fatalError("a non-completed activity must not decode as a send response")
+    } catch {
+      return error
+    }
   }
 
   // MARK: Nonces (sponsored sends)
@@ -628,12 +673,16 @@ extension MockTurnkey {
     caip2: String,
     value: String?,
     data: String?,
-    sendTransactionStatusId: String
+    sendTransactionStatusId: String?,
+    status: v1ActivityStatus = .activity_status_completed,
+    failureMessage: String? = nil,
+    createdAtSeconds: String = "1714521600"
   ) -> v1Activity {
     v1Activity(
       canApprove: false,
       canReject: false,
-      createdAt: externaldatav1Timestamp(nanos: "0", seconds: "1714521600"),
+      createdAt: externaldatav1Timestamp(nanos: "0", seconds: createdAtSeconds),
+      failure: failureMessage.map { rpcStatus(message: $0) },
       fingerprint: "fingerprint",
       id: id,
       intent: v1Intent(
@@ -653,13 +702,13 @@ extension MockTurnkey {
       ),
       organizationId: "org-id",
       result: v1Result(
-        ethSendTransactionResult: v1EthSendTransactionResult(
-          sendTransactionStatusId: sendTransactionStatusId
-        )
+        ethSendTransactionResult: sendTransactionStatusId.map {
+          v1EthSendTransactionResult(sendTransactionStatusId: $0)
+        }
       ),
-      status: .activity_status_completed,
+      status: status,
       type: .activity_type_eth_send_transaction,
-      updatedAt: externaldatav1Timestamp(nanos: "0", seconds: "1714521600"),
+      updatedAt: externaldatav1Timestamp(nanos: "0", seconds: createdAtSeconds),
       votes: []
     )
   }
@@ -751,13 +800,16 @@ extension MockTurnkey {
     signWith: String,
     caip2: String,
     unsignedTransaction: String,
-    sendTransactionStatusId: String,
-    createdAtSeconds: String = "1714521600"
+    sendTransactionStatusId: String?,
+    createdAtSeconds: String = "1714521600",
+    status: v1ActivityStatus = .activity_status_completed,
+    failureMessage: String? = nil
   ) -> v1Activity {
     v1Activity(
       canApprove: false,
       canReject: false,
       createdAt: externaldatav1Timestamp(nanos: "0", seconds: createdAtSeconds),
+      failure: failureMessage.map { rpcStatus(message: $0) },
       fingerprint: "fingerprint",
       id: id,
       intent: v1Intent(
@@ -771,11 +823,11 @@ extension MockTurnkey {
       ),
       organizationId: "org-id",
       result: v1Result(
-        solSendTransactionResult: v1SolSendTransactionResult(
-          sendTransactionStatusId: sendTransactionStatusId
-        )
+        solSendTransactionResult: sendTransactionStatusId.map {
+          v1SolSendTransactionResult(sendTransactionStatusId: $0)
+        }
       ),
-      status: .activity_status_completed,
+      status: status,
       type: .activity_type_sol_send_transaction,
       updatedAt: externaldatav1Timestamp(nanos: "0", seconds: createdAtSeconds),
       votes: []
@@ -811,6 +863,10 @@ private struct SendTransactionStatusResponseFixture: Encodable {
   let solana: v1SolanaSendTransactionStatus?
   let txError: String?
   let txStatus: String
+}
+
+private struct ActivityResponseFixture: Encodable {
+  let activity: v1Activity
 }
 
 private struct ActivitiesResponseFixture: Encodable {

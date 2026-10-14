@@ -30,7 +30,9 @@ import per provider suffices. The 1.x `RainSDK` umbrella module has been REMOVED
   environment's chains). Error codes COMPACTED (no external users yet; Android to follow):
   `chainNotSupported` moved RAIN_105 → RAIN_104; `apiError` (RAIN_302, nothing threw it once the
   Rain API client left — the adapters' `.apiError` matches are Turnkey's own type) dropped and
-  `transactionPending` moved RAIN_303 → RAIN_302; RAIN_304 dropped — the sequence has no gaps. No wallet vendor SDKs. EVM ABI encoding + collateral contract reads go through
+  `transactionPending` moved RAIN_303 → RAIN_302; RAIN_304 dropped. 303/304 are never reused: a
+  new 3xx starts at 305 — `transactionOutcomeUnknown` = RAIN_305 (added 2026-10-14, same as
+  Android), a new 1xx at 106. No wallet vendor SDKs. EVM ABI encoding + collateral contract reads go through
   Boilertalk Web3.swift ONLY — web3swift was REMOVED 2026-09-15 (abandoned upstream since 2025;
   its URLSession overload trick stopped compiling on new Xcode). Contract call outputs from
   Boilertalk decode under the ABI output NAME as key ("" for unnamed outputs, not "0").
@@ -191,6 +193,28 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   details) to `transactionSimulationFailed`, so `mapWithdrawalError` still yields
   `withdrawalRevertedByNetwork` (RAIN_405); other failures stay `providerError`. Both poll
   loops use it. Android's poll loops still throw providerError — flag for parity.
+  SEND OUTCOMES (2026-10-14, parity with Android #75 / WALL-119; `TurnkeySendOutcome.swift`).
+  VENDOR FACTS (swift-sdk 4.0.0, verified in source): `ethSendTransaction`/`solSendTransaction`
+  submit THEN poll `get_activity` inside the call (`ActivityPollerConfig` 1 s × 3, NOT exposed
+  on `TurnkeyContext`); the response types have a NON-optional `sendTransactionStatusId` that
+  only exists for COMPLETED — any other ending (PENDING past the poll, FAILED, REJECTED,
+  CONSENSUS_NEEDED) is decoded "as-is" into that type and throws `DecodingError`, LOSING the
+  `v1Activity`. So the adapter owns the ending: `sortedSendOutcome` runs the vendor call inside
+  `executeWrite` and converts every post-submit failure to an outcome (the coordinator's 401
+  refresh-and-retry can only ever re-run a pre-submit failure — a 401 from the vendor's in-call
+  poll is indistinguishable from a submit 401, so sends are NEVER re-submitted). Four endings:
+  status id → existing status poll; accepted activity (decode failure or 401) → READ BACK from
+  `getActivities` (newest of the type since submit − 30 s skew, matched on intent via
+  `evmIntentMatcher`/`solanaIntentMatcher`) then `awaitSendActivity` polls `getActivity` ×10
+  (COMPLETED → status id; FAILED/REJECTED → providerError(`TurnkeySendActivityFailure`, reason
+  from `activity.failure?.message`), never userRejected; still pending or session dies →
+  RAIN_302 carrying the ACTIVITY id); refusal (4xx ≠ 401) → leaves as itself; everything else
+  (5xx, transport, read-back finds nothing) → `transactionOutcomeUnknown` RAIN_305 (new core
+  case; no cause on purpose). RAIN_302 `statusId` may now be an activity id (doc widened).
+  `TurnkeyClientProtocol` gained `getActivity`. Mock: `activityNotCompletedError(_:kind:)`
+  builds the GENUINE vendor error shape. Vendor ticket to file on tkhq/swift-sdk (mirror
+  kotlin-sdk#98): typed error carrying the activity + expose the poller config; when it lands,
+  the read-back can go (Android deleted theirs at http 2.2.0).
   Turnkey: `TurnkeyBroadcastChains` (vendor's managed-broadcast list — EVM mainnets+testnets per
   docs.turnkey.com broadcasting page; Solana mainnet+devnet ONLY; also owns the get-balances
   chain list) — every send entry (EVM funnel `sendTransaction`, Solana funnel, both transfer

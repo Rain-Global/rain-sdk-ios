@@ -30,6 +30,12 @@ internal protocol TurnkeyClientProtocol {
     _ input: TGetActivitiesBody
   ) async throws -> TGetActivitiesResponse
 
+  /// One activity by id — any status decodes (unlike the typed send responses, which only decode
+  /// a COMPLETED activity). The send paths wait on an accepted-but-unfinished send through this.
+  func getActivity(
+    _ input: TGetActivityBody
+  ) async throws -> TGetActivityResponse
+
   /// Account and gas-station nonces; sponsored sends fetch the gas-station nonce through this.
   func getNonces(
     _ input: TGetNoncesBody
