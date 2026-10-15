@@ -36,18 +36,21 @@ struct TurnkeySendOutcomeTests {
     )
   }
 
-  /// An EVM send activity matching what `send` submits, in the given state.
+  /// An EVM send activity matching what `send` submits, in the given state. Carries the
+  /// gas-station nonce the sponsored body fetches (the mock's default), since the matcher
+  /// compares it.
   private func activity(
     id: String = "activity-1",
     status: v1ActivityStatus,
     statusId: String? = nil,
     failure: String? = nil,
-    createdAtSeconds: String = String(Int(Date().timeIntervalSince1970))
+    createdAtSeconds: String = String(Int(Date().timeIntervalSince1970)),
+    gasStationNonce: String? = "7"
   ) -> v1Activity {
     MockTurnkey.makeActivity(
       id: id, from: Self.from, to: Self.to, caip2: Self.caip2, value: "1", data: nil,
       sendTransactionStatusId: statusId, status: status, failureMessage: failure,
-      createdAtSeconds: createdAtSeconds
+      createdAtSeconds: createdAtSeconds, gasStationNonce: gasStationNonce
     )
   }
 
@@ -281,6 +284,105 @@ struct TurnkeySendOutcomeTests {
     await #expect(throws: RainError.transactionPending(statusId: "activity-1")) {
       try await send(makeAdapter(turnkey))
     }
+  }
+
+  // MARK: - Review follow-ups (#44)
+
+  @Test("a 429 or 408 from the send call may be the vendor's poll, so the activity is read back")
+  func rateLimitAfterAcceptanceReadsBack() async throws {
+    for status in [429, 408] {
+      let turnkey = MockTurnkey()
+      let client = turnkey.turnkeyClient as! MockTurnkeyClient
+      client.ethSendTransactionError = TurnkeyRequestError.apiError(statusCode: status, payload: nil)
+      client.mockActivities = [activity(status: .activity_status_completed, statusId: "recovered")]
+      client.sendTransactionStatusQueue = [.broadcasted(hash: "0xrecovered")]
+
+      let hash = try await send(makeAdapter(turnkey))
+
+      #expect(hash == "0xrecovered", "HTTP \(status)")
+      #expect(client.ethSendTransactionCalls.count == 1, "HTTP \(status): no second submit")
+    }
+  }
+
+  @Test("a 5xx while waiting on the activity ends as RAIN_302 with the activity id, not 501")
+  func serverErrorWhileWaiting() async throws {
+    let turnkey = MockTurnkey()
+    let client = turnkey.turnkeyClient as! MockTurnkeyClient
+    let pending = activity(status: .activity_status_pending)
+    client.ethSendTransactionError = MockTurnkeyClient.activityNotCompletedError(pending, kind: .evm)
+    client.mockActivities = [pending]
+    client.getActivityError = TurnkeyRequestError.apiError(statusCode: 503, payload: nil)
+
+    await #expect(throws: RainError.transactionPending(statusId: "activity-1")) {
+      try await send(makeAdapter(turnkey))
+    }
+  }
+
+  @Test("a failed status read after a status id ends as RAIN_302 with the status id, not 301/501")
+  func statusReadFailureKeepsTheStatusId() async throws {
+    for failure: Error in [URLError(.networkConnectionLost), TurnkeyRequestError.apiError(statusCode: 500, payload: nil)] {
+      let turnkey = MockTurnkey()
+      let client = turnkey.turnkeyClient as! MockTurnkeyClient
+      client.sendTransactionStatusError = failure
+
+      await #expect(throws: RainError.transactionPending(statusId: "send-status-id")) {
+        try await send(makeAdapter(turnkey))
+      }
+      #expect(client.ethSendTransactionCalls.count == 1)
+    }
+  }
+
+  @Test("a cancelled send surfaces as CancellationError, never as an outcome")
+  func cancellationPassesThrough() async throws {
+    let turnkey = MockTurnkey()
+    let client = turnkey.turnkeyClient as! MockTurnkeyClient
+    client.ethSendTransactionError = CancellationError()
+
+    await #expect(throws: CancellationError.self) {
+      try await send(makeAdapter(turnkey))
+    }
+    #expect(client.getActivitiesCalls.isEmpty)
+  }
+
+  @Test("the EVM matcher tells two otherwise identical sends apart by their nonce")
+  func evmMatcherUsesNonce() {
+    let body = TEthSendTransactionBody(
+      organizationId: "org", caip2: Self.caip2, data: nil, from: Self.from,
+      gasStationNonce: "7", sponsor: true, to: Self.to, value: "1"
+    )
+    let matches = TurnkeyWalletProviderAdapter.evmIntentMatcher(body)
+    func withNonce(_ gasStationNonce: String?) -> v1Activity {
+      MockTurnkey.makeActivity(
+        id: "a", from: Self.from, to: Self.to, caip2: Self.caip2, value: "1", data: nil,
+        sendTransactionStatusId: nil, status: .activity_status_pending, gasStationNonce: gasStationNonce
+      )
+    }
+    #expect(matches(withNonce("7")))
+    #expect(!matches(withNonce("6")), "an earlier identical send carries an earlier nonce")
+  }
+
+  @Test("the send gate runs submit phases one at a time, in order")
+  func sendGateSerialises() async throws {
+    let gate = TurnkeySendGate()
+    let log = Log()
+
+    await gate.acquire()
+    let second = Task {
+      await gate.acquire()
+      await log.append("second-in")
+      await gate.release()
+    }
+    try await Task.sleep(nanoseconds: 20_000_000)
+    await log.append("first-done")
+    await gate.release()
+    await second.value
+
+    #expect(await log.entries == ["first-done", "second-in"])
+  }
+
+  private actor Log {
+    var entries: [String] = []
+    func append(_ entry: String) { entries.append(entry) }
   }
 
   // MARK: - Classification helpers

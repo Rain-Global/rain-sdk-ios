@@ -676,7 +676,8 @@ extension MockTurnkey {
     sendTransactionStatusId: String?,
     status: v1ActivityStatus = .activity_status_completed,
     failureMessage: String? = nil,
-    createdAtSeconds: String = "1714521600"
+    createdAtSeconds: String = "1714521600",
+    gasStationNonce: String? = nil
   ) -> v1Activity {
     v1Activity(
       canApprove: false,
@@ -691,7 +692,7 @@ extension MockTurnkey {
           data: data,
           from: from,
           gasLimit: "21000",
-          gasStationNonce: nil,
+          gasStationNonce: gasStationNonce,
           maxFeePerGas: "1000000000",
           maxPriorityFeePerGas: "1000000000",
           nonce: "1",

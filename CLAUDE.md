@@ -203,14 +203,21 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   `executeWrite` and converts every post-submit failure to an outcome (the coordinator's 401
   refresh-and-retry can only ever re-run a pre-submit failure — a 401 from the vendor's in-call
   poll is indistinguishable from a submit 401, so sends are NEVER re-submitted). Four endings:
-  status id → existing status poll; accepted activity (decode failure or 401) → READ BACK from
-  `getActivities` (newest of the type since submit − 30 s skew, matched on intent via
-  `evmIntentMatcher`/`solanaIntentMatcher`) then `awaitSendActivity` polls `getActivity` ×10
-  (COMPLETED → status id; FAILED/REJECTED → providerError(`TurnkeySendActivityFailure`, reason
-  from `activity.failure?.message`), never userRejected; still pending or session dies →
-  RAIN_302 carrying the ACTIVITY id); refusal (4xx ≠ 401) → leaves as itself; everything else
-  (5xx, transport, read-back finds nothing) → `transactionOutcomeUnknown` RAIN_305 (new core
-  case; no cause on purpose). RAIN_302 `statusId` may now be an activity id (doc widened).
+  status id → existing status poll; accepted activity (decode failure, or 401/408/429 — the
+  Swift client throws the IDENTICAL apiError for submit and in-call poll, so none of those is a
+  refusal; review #44) → READ BACK from `getActivities` (newest of the type since submit − 30 s
+  skew, matched on intent via `evmIntentMatcher` incl. nonce/gasStationNonce /
+  `solanaIntentMatcher`) then `awaitSendActivity` polls `getActivity` ×10 (COMPLETED → status
+  id; FAILED/REJECTED → providerError(`TurnkeySendActivityFailure`, reason from
+  `activity.failure?.message`), never userRejected; still pending → RAIN_302 carrying the
+  ACTIVITY id); refusal (other 4xx) → leaves as itself; everything else (5xx, transport,
+  read-back finds nothing) → `transactionOutcomeUnknown` RAIN_305 (new core case; no cause on
+  purpose). RULE (review #44): once Turnkey has accepted, EVERY failed read — activity wait,
+  both status polls — ends as RAIN_302 with the id it holds (catch-all, not just tokenExpired);
+  only `CancellationError` passes through (plus `Task.isCancelled` checks, since a cancelled
+  URLSession throws a URL error). `TurnkeySendGate` (actor, FIFO) serialises each adapter's
+  submit-and-identify phase so overlapping sends can't claim the same newest activity; the
+  status poll runs outside it. RAIN_302 `statusId` may now be an activity id (doc widened).
   `TurnkeyClientProtocol` gained `getActivity`. Mock: `activityNotCompletedError(_:kind:)`
   builds the GENUINE vendor error shape. Vendor ticket to file on tkhq/swift-sdk (mirror
   kotlin-sdk#98): typed error carrying the activity + expose the poller config; when it lands,

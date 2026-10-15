@@ -135,19 +135,23 @@ The adapter therefore owns the ending. After the submit a send has exactly four:
    `get_send_transaction_status` for the hash (EVM) or signature (Solana), up to 30 s. A
    `FAILED` status carrying a decoded revert is `withdrawalRevertedByNetwork` / `RAIN_405` on a
    withdrawal (`providerError` elsewhere); a poll that runs out is `transactionPending` /
-   `RAIN_302` carrying the **status id**.
-2. **An accepted activity** — the vendor threw its decode failure, or answered 401, after
-   Turnkey accepted the activity. The adapter reads the activity back from the activity log
-   (newest `ETH_SEND_TRANSACTION` / `SOL_SEND_TRANSACTION` created since the submit, matched on
-   the intent: `from` + `to` + calldata + value, or signer + cluster + the unsigned transaction)
-   and waits on it by id with `get_activity` — ten reads, one per second. `COMPLETED` joins
-   ending 1; `FAILED` / `REJECTED` is `providerError` / `RAIN_501` carrying Turnkey's reason
-   (never `userRejected`); still executing after the budget is `transactionPending` /
-   `RAIN_302` carrying the **activity id** — no SDK call takes it, but it equals `uniqueId`
-   on the history row for the send. A session that dies mid-wait also ends as `RAIN_302` with
-   the activity id: the send was accepted, only our view of it stopped.
-3. **A refusal** — Turnkey answered the submit with a 4xx other than 401. Nothing was executed;
-   the error leaves as itself and maps as usual (403 → `unauthorized`, …).
+   `RAIN_302` carrying the **status id**. So is a status *read* that fails for good — the
+   session dying, a dropped connection, a 5xx past the coordinator's retries: Turnkey has the
+   transaction, only our view of it stopped.
+2. **An accepted activity** — the vendor threw its decode failure, or answered 401, 408 or
+   429, after Turnkey accepted the activity (the Swift client throws the identical error for
+   the submit and for its in-call poll, so none of those can be read as a refusal). The adapter
+   reads the activity back from the activity log (newest `ETH_SEND_TRANSACTION` /
+   `SOL_SEND_TRANSACTION` created since the submit, matched on the intent: `from` + `to` +
+   calldata + value + the account or gas-station nonce, or signer + cluster + the unsigned
+   transaction) and waits on it by id with `get_activity` — ten reads, one per second.
+   `COMPLETED` joins ending 1; `FAILED` / `REJECTED` is `providerError` / `RAIN_501` carrying
+   Turnkey's reason (never `userRejected`); still executing after the budget is
+   `transactionPending` / `RAIN_302` carrying the **activity id** — no SDK call takes it, but
+   it equals `uniqueId` on the history row for the send. Any read that fails mid-wait ends the
+   same way, with the activity id.
+3. **A refusal** — Turnkey answered the submit with a 4xx other than 401 / 408 / 429. Nothing
+   was executed; the error leaves as itself and maps as usual (403 → `unauthorized`, …).
 4. **Unknown fate** — a 5xx to the submit, a transport failure, an undecodable answer, or an
    accepted-activity read-back that finds nothing. The send may still land, and there is no
    identifier to resume from: `transactionOutcomeUnknown` / `RAIN_305`. It carries no cause on
@@ -157,7 +161,12 @@ The adapter therefore owns the ending. After the submit a send has exactly four:
 What this guarantees a host: **the SDK never submits a send twice.** A 401 on a send is not
 refreshed-and-retried (unlike signing, where it is): the activity is read back instead, and if
 nothing is found the ending is `RAIN_305` rather than a second activity. `RAIN_501` from a
-Turnkey send therefore always means *settled, nothing moved*.
+Turnkey send therefore always means *settled, nothing moved*. Sends on one provider are
+serialised through their submit-and-identify phase (a small per-adapter gate), so two
+overlapping sends cannot both read back the same "newest" activity; the 30 s status poll runs
+outside the gate. Cancelling the task that called the send surfaces `CancellationError` at
+every stage, never an outcome — but the send may already have gone out, so a host that cancels
+should treat it like `RAIN_305`.
 
 Same four endings and codes as rain-sdk-android. Android takes the activity from the Kotlin
 client's typed `ActivityNotCompleted` error (http 2.2.0); the Swift client has no equivalent

@@ -88,10 +88,16 @@ extension TurnkeyWalletProviderAdapter {
   /// below 500 other than 401, or a `RainError` raised before anything was sent; everything else
   /// is an outcome, so the session coordinator never sees a post-submit failure it could retry.
   ///
-  /// A 401 is NOT left as itself for sends: the vendor polls inside the call, so the 401 may
-  /// have come from a poll after the submit went through. It is handled like a decode failure —
-  /// read the activity back (the read refreshes the session) — and ends unknown if nothing is
-  /// found. Losing one legitimate refresh-and-retry is cheaper than a duplicate transfer.
+  /// A 401, 408 or 429 is NOT left as itself for sends: the vendor polls inside the call with
+  /// the same request path as the submit, so any of them may have come from a poll after the
+  /// submit went through (the Swift client throws the identical `apiError` for both phases).
+  /// They are handled like a decode failure — read the activity back (the read refreshes the
+  /// session) — and end unknown if nothing is found. Losing one legitimate refresh-and-retry is
+  /// cheaper than a duplicate transfer.
+  ///
+  /// Cancellation passes through untouched: a host cancelling a send must see
+  /// `CancellationError`, not an outcome. A cancelled URLSession call surfaces as a URL error,
+  /// so the task flag is checked too.
   internal func sortedSendOutcome(
     kind: TurnkeySendKind,
     matches: @escaping @Sendable (v1Activity) -> Bool,
@@ -106,19 +112,27 @@ extension TurnkeyWalletProviderAdapter {
       // Raised by our own code before the vendor call (body building, nonce fetch).
       throw error
     } catch {
-      if Self.isActivityNotCompletedDecode(error) || Self.httpStatus(of: error) == 401 {
-        if let activity = await readBackSendActivity(kind: kind, since: submittedAt, matches: matches) {
+      if Task.isCancelled { throw CancellationError() }
+      let status = Self.httpStatus(of: error)
+      if Self.isActivityNotCompletedDecode(error) || Self.mayFollowAcceptance(status) {
+        if let activity = try await readBackSendActivity(kind: kind, since: submittedAt, matches: matches) {
           return .activity(activity)
         }
         return .dropped(error)
       }
-      if let status = Self.httpStatus(of: error), status < 500 {
+      if let status, status < 500 {
         // Turnkey refused the submit; nothing was executed.
         throw error
       }
       // 5xx, transport failure, undecodable answer: the request may have gone out.
       return .dropped(error)
     }
+  }
+
+  /// Statuses the vendor's in-call poll can raise after an accepted submit, which therefore
+  /// cannot be read as a refusal of the submit.
+  private static func mayFollowAcceptance(_ status: Int?) -> Bool {
+    status == 401 || status == 408 || status == 429
   }
 
   /// The ending the vendor cannot represent: it decoded a non-COMPLETED activity into a response
@@ -165,12 +179,13 @@ extension TurnkeyWalletProviderAdapter {
 
   /// Finds the activity the vendor dropped: the newest send activity of `kind` created at or
   /// after the submit (less skew) whose intent matches what we sent. Nil when the log shows no
-  /// such activity, or the read itself fails — the caller then reports an unknown fate.
+  /// such activity, or the read itself fails — the caller then reports an unknown fate. Only
+  /// cancellation throws.
   private func readBackSendActivity(
     kind: TurnkeySendKind,
     since submittedAt: Date,
     matches: @escaping @Sendable (v1Activity) -> Bool
-  ) async -> v1Activity? {
+  ) async throws -> v1Activity? {
     let response: TGetActivitiesResponse
     do {
       response = try await sessions.executeRead { session, client in
@@ -182,7 +197,10 @@ extension TurnkeyWalletProviderAdapter {
           )
         )
       }
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
+      if Task.isCancelled { throw CancellationError() }
       RainLogger.warning("Rain SDK: Turnkey send read-back failed: \(error)")
       return nil
     }
@@ -203,8 +221,11 @@ extension TurnkeyWalletProviderAdapter {
   /// Turns an accepted activity into a send-status id: polls `getActivity` until the activity
   /// settles. COMPLETED -> its status id; FAILED / REJECTED -> `providerError` with Turnkey's
   /// reason; still executing after the budget -> `transactionPending` carrying the ACTIVITY id
-  /// (no call takes it, but it matches the history row). A session dying mid-wait also ends as
-  /// pending with the activity id — the send was accepted, only our view of it stopped.
+  /// (no call takes it, but it matches the history row). ANY failure of a read mid-wait — the
+  /// session dying, a dropped connection, a 5xx past the coordinator's retries — also ends as
+  /// pending with the activity id: the send was accepted, only our view of it stopped, and a
+  /// `networkError` or `providerError` here would read as "failed" and invite a second send.
+  /// Only cancellation passes through.
   internal func awaitSendActivity(
     _ accepted: v1Activity,
     kind: TurnkeySendKind
@@ -237,7 +258,10 @@ extension TurnkeyWalletProviderAdapter {
             TGetActivityBody(organizationId: session.organizationId, activityId: activity.id)
           )
         }.activity
-      } catch let error as RainError where error == .tokenExpired {
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        if Task.isCancelled { throw CancellationError() }
         throw RainError.transactionPending(statusId: activity.id)
       }
     }
@@ -287,13 +311,19 @@ extension TurnkeyWalletProviderAdapter {
   // MARK: Intent matching
 
   /// The intent of an EVM send we composed, for matching a read-back activity. Hex compares are
-  /// case-insensitive; empty calldata and `0x` are the same thing.
+  /// case-insensitive; empty calldata and `0x` are the same thing. The nonce the body carries —
+  /// the account nonce on a self-paid send, the gas-station nonce on a sponsored one — is part
+  /// of the identity, so an earlier identical send inside the window cannot be mistaken for
+  /// this one. (A sponsored body with no gas-station nonce lets Turnkey pick it server-side;
+  /// that send is then identified by the rest, and by the send gate serialising submits.)
   internal static func evmIntentMatcher(_ body: TEthSendTransactionBody) -> @Sendable (v1Activity) -> Bool {
     let from = body.from.lowercased()
     let to = body.to.lowercased()
     let data = normalizedHex(body.data)
     let value = body.value
     let caip2 = body.caip2
+    let nonce = body.nonce
+    let gasStationNonce = body.gasStationNonce
     return { activity in
       guard let intent = activity.intent.ethSendTransactionIntent else { return false }
       return intent.caip2 == caip2
@@ -301,6 +331,8 @@ extension TurnkeyWalletProviderAdapter {
         && intent.to.lowercased() == to
         && normalizedHex(intent.data) == data
         && (value == nil || intent.value == value)
+        && (nonce == nil || intent.nonce == nonce)
+        && (gasStationNonce == nil || intent.gasStationNonce == gasStationNonce)
     }
   }
 
@@ -321,5 +353,49 @@ extension TurnkeyWalletProviderAdapter {
   private static func normalizedHex(_ value: String?) -> String {
     guard let value, !value.isEmpty, value != "0x" else { return "" }
     return value.lowercased()
+  }
+}
+
+// MARK: - Send gate
+
+/// Serialises the submit-and-identify phase of sends on one adapter. Two overlapping sends
+/// could otherwise both read back "the newest matching activity" and claim the same one; with
+/// the gate, a send's read-back runs before the next send submits. Only that phase is gated —
+/// the 30 s status poll runs outside it, so a slow confirmation does not block the next send.
+/// Plain FIFO: a waiter is resumed in order and is not cancellable while queued (the phase it
+/// waits for is bounded by the vendor's poll plus the activity wait).
+internal actor TurnkeySendGate {
+  private var busy = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+
+  func acquire() async {
+    if !busy {
+      busy = true
+      return
+    }
+    await withCheckedContinuation { waiters.append($0) }
+  }
+
+  func release() {
+    if waiters.isEmpty {
+      busy = false
+    } else {
+      waiters.removeFirst().resume()
+    }
+  }
+}
+
+extension TurnkeyWalletProviderAdapter {
+  /// Runs `phase` under the adapter's send gate, releasing on every exit.
+  internal func gatedSend<T>(_ phase: () async throws -> T) async throws -> T {
+    await sendGate.acquire()
+    do {
+      let result = try await phase()
+      await sendGate.release()
+      return result
+    } catch {
+      await sendGate.release()
+      throw error
+    }
   }
 }
