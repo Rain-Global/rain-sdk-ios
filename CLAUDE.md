@@ -215,7 +215,10 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   purpose). RULE (review #44): once Turnkey has accepted, EVERY failed read — activity wait,
   both status polls — ends as RAIN_302 with the id it holds (catch-all, not just tokenExpired);
   only `CancellationError` passes through (plus `Task.isCancelled` checks, since a cancelled
-  URLSession throws a URL error). `TurnkeySendGate` (actor, FIFO) serialises each adapter's
+  URLSession throws a URL error) — and it must ALSO pass through `RainSdkManager`: every
+  `catch { throw RainError.from(underlying:) }` there is preceded by
+  `catch is CancellationError { throw CancellationError() }` (review #44; `from` would wrap it as
+  RAIN_501 "settled"). Keep that pair on any new manager method. `TurnkeySendGate` (actor, FIFO) serialises each adapter's
   submit-and-identify phase so overlapping sends can't claim the same newest activity; the
   status poll runs outside it. RAIN_302 `statusId` may now be an activity id (doc widened).
   `TurnkeyClientProtocol` gained `getActivity`. Mock: `activityNotCompletedError(_:kind:)`

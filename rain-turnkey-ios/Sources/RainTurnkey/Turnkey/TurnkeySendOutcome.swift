@@ -386,7 +386,10 @@ internal actor TurnkeySendGate {
 }
 
 extension TurnkeyWalletProviderAdapter {
-  /// Runs `phase` under the adapter's send gate, releasing on every exit.
+  /// Runs `phase` under the adapter's send gate, releasing on every exit. A phase that failed
+  /// because the task was cancelled — a cancelled URLSession call while the body was being
+  /// built surfaces as a URL error, not `CancellationError` — leaves as `CancellationError`, so
+  /// the manager's mapping never calls the caller walking away a provider failure.
   internal func gatedSend<T>(_ phase: () async throws -> T) async throws -> T {
     await sendGate.acquire()
     do {
@@ -395,6 +398,7 @@ extension TurnkeyWalletProviderAdapter {
       return result
     } catch {
       await sendGate.release()
+      if Task.isCancelled { throw CancellationError() }
       throw error
     }
   }

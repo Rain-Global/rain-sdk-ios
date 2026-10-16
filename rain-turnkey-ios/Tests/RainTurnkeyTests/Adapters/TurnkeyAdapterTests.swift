@@ -617,6 +617,27 @@ struct TurnkeyAdapterTests {
     #expect(client.ethSendTransactionCalls.count == 1)
   }
 
+  @Test("a cancelled send reaches the RainClient caller as CancellationError, not RAIN_501")
+  func testSendNativeCancellationReachesTheCaller() async throws {
+    await MockURLProtocol.install()
+    defer { MockURLProtocol.reset() }
+    stubSendTransactionRPCs()
+
+    let mockTurnkey = MockTurnkey()
+    let client = mockTurnkey.turnkeyClient as! MockTurnkeyClient
+    client.ethSendTransactionError = CancellationError()
+
+    let (manager, _, _) = TestManagers.turnkeyManager(turnkey: mockTurnkey)
+
+    await #expect(throws: CancellationError.self) {
+      _ = try await manager.sendNative(
+        chainId: 1,
+        to: TestFixtures.recipientAddress,
+        amount: 1.0
+      )
+    }
+  }
+
   // MARK: - Polling status
 
   @Test("pollForTransactionHash throws when status reports failure")
