@@ -218,7 +218,12 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   URLSession throws a URL error) — and it must ALSO pass through `RainSdkManager`: every
   `catch { throw RainError.from(underlying:) }` there is preceded by
   `catch is CancellationError { throw CancellationError() }` (review #44; `from` would wrap it as
-  RAIN_501 "settled"). Keep that pair on any new manager method. `TurnkeySendGate` (actor, FIFO) serialises each adapter's
+  RAIN_501 "settled"). Keep that pair on any new manager method. Same guard (+
+  `Task.isCancelled`, since a cancelled URLSession throws `URLError.cancelled` → networkError)
+  on `JsonRpcClient`, `PrivyRpcClient`, Portal/Privy provider resolution. FOLLOW-UP (not done):
+  one SPI helper `RainError.mapping(_:) throws -> RainError` (rethrows cancellation, else
+  `from`) replacing all hand-written pairs, and the 14 unguarded sites in
+  `TurnkeyManagedAuth` + `RainSdk.provider` resolution (auth-tier: wrong code, no money). `TurnkeySendGate` (actor, FIFO) serialises each adapter's
   submit-and-identify phase so overlapping sends can't claim the same newest activity; the
   status poll runs outside it. RAIN_302 `statusId` may now be an activity id (doc widened).
   `TurnkeyClientProtocol` gained `getActivity`. Mock: `activityNotCompletedError(_:kind:)`

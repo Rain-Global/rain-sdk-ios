@@ -165,7 +165,12 @@ public struct PortalProvider: ProviderDescriptor {
       )
     } catch let error as RainError {
       throw error
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
+      // A cancelled URLSession call surfaces as a URL error, not CancellationError; the
+      // caller walking away must never be reported as a network or provider verdict.
+      if Task.isCancelled { throw CancellationError() }
       throw RainError.from(underlying: error)
     }
   }
