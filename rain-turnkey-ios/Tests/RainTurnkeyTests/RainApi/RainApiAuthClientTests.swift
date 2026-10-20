@@ -116,7 +116,7 @@ struct RainApiAuthClientTests {
     #expect(attestation?["attestationObject"] as? String == "o2NmbXQ")
     #expect(attestation?["transports"] as? [String] == ["AUTHENTICATOR_TRANSPORT_INTERNAL", "AUTHENTICATOR_TRANSPORT_HYBRID"])
     // rain-api rejects unknown keys, so nothing else may ride along.
-    #expect(Set(attestation?.keys ?? []) == ["credentialId", "clientDataJson", "attestationObject", "transports"])
+    #expect(Set(attestation?.keys.map { $0 } ?? []) == ["credentialId", "clientDataJson", "attestationObject", "transports"])
     #expect(Set(body.keys) == ["challenge", "attestation"])
   }
 
