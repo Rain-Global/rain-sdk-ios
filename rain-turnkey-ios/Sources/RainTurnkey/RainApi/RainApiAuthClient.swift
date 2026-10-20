@@ -65,10 +65,20 @@ internal struct RainApiClientSignature: Equatable, Encodable, Sendable {
   }
 }
 
-/// What the passkey ceremony produced, for `/signup/passkey`.
+/// What the passkey ceremony produced, for `/signup/passkey`. `attestation` is an object —
+/// rain-api validates exactly these four fields (`types.ts`) and rejects anything else — and
+/// matches the vendor's `v1Attestation`, so the ceremony result maps field for field.
 internal struct RainApiPasskeyAttestation: Equatable, Encodable, Sendable {
+  struct Attestation: Equatable, Encodable, Sendable {
+    let credentialId: String
+    let clientDataJson: String
+    let attestationObject: String
+    /// Vendor `v1AuthenticatorTransport` raw values, e.g. `AUTHENTICATOR_TRANSPORT_INTERNAL`.
+    let transports: [String]
+  }
+
   let challenge: String
-  let attestation: String
+  let attestation: Attestation
 }
 
 // MARK: - Errors
@@ -83,7 +93,8 @@ internal struct RainApiAuthError: Error, Equatable, Sendable {
     case verificationFailed
     /// 401 expired / revoked / bad token: ask the host for a new one.
     case tokenRejected
-    /// 403: tenant flag off, or wrong token kind for the endpoint.
+    /// The tenant cannot use embedded wallets — 403 (flag off, wrong token kind) or 401
+    /// "Invalid tenant" (no API access, not compliance-approved). A new token does not help.
     case forbidden
     /// 404 on login: no wallet for this contact in this tenant — sign up.
     case noWallet
@@ -109,9 +120,9 @@ internal struct RainApiAuthError: Error, Equatable, Sendable {
     case .invalidCode:
       return .invalidLoginCode
     case .tokenRejected:
-      return .unauthorized(details: "Rain rejected the wallet auth token (HTTP 401): \(message)")
+      return .unauthorized(details: "Rain rejected the wallet auth token (HTTP \(statusCode)): \(message)")
     case .forbidden:
-      return .unauthorized(details: "Rain refused embedded-wallet auth (HTTP 403): \(message)")
+      return .unauthorized(details: "Rain refused embedded-wallet auth for this tenant (HTTP \(statusCode)): \(message)")
     case .verificationFailed, .noWallet, .conflict, .rateLimited, .serverError, .other:
       return .providerError(underlying: self)
     }
@@ -240,9 +251,15 @@ internal struct RainApiAuthClient: RainApiAuthClientProtocol {
     let kind: RainApiAuthError.Kind
     switch statusCode {
     case 400:
-      // "Invalid or expired code" is the only 400 the user can fix by retyping.
-      kind = lower.contains("code") ? .invalidCode : .verificationFailed
-    case 401: kind = .tokenRejected
+      // "Invalid or expired code" is the only 400 the user can fix by retyping. Match the
+      // whole phrase: /otp/init's "This contact can't receive a code" is also a 400 and must
+      // not read as a wrong code before any code was sent.
+      kind = lower.contains("invalid or expired code") ? .invalidCode : .verificationFailed
+    case 401:
+      // "Invalid tenant" (no API access, or not compliance-approved) is also a 401, but a new
+      // token would fail the same way — classify it with the tenant refusals so the controller
+      // never loops on the host's token provider.
+      kind = lower.contains("invalid tenant") ? .forbidden : .tokenRejected
     case 403: kind = .forbidden
     case 404: kind = .noWallet
     case 409: kind = .conflict

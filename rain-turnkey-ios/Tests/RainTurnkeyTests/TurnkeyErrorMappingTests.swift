@@ -13,6 +13,18 @@ struct TurnkeyErrorMappingTests {
   /// RainError.from directly, so make sure registration ran.
   init() { TurnkeyErrorMapping.registerOnce() }
 
+  @Test("from(_:) maps a rain-api auth refusal through the registry, so no call site must remember .rainError")
+  func testRainApiAuthErrorMapsThroughRegistry() {
+    let wrongCode = RainApiAuthError(kind: .invalidCode, statusCode: 400, message: "Invalid or expired code")
+    #expect(RainError.from(underlying: wrongCode) == .invalidLoginCode)
+
+    let badToken = RainApiAuthError(kind: .tokenRejected, statusCode: 401, message: "Token expired")
+    #expect(RainError.from(underlying: badToken) == .unauthorized())
+
+    let rateLimited = RainApiAuthError(kind: .rateLimited, statusCode: 429, message: "Too many attempts")
+    #expect(RainError.from(underlying: rateLimited).code == "RAIN_501")
+  }
+
   @Test("from(_:) maps TurnkeySwiftError.invalidSession to tokenExpired")
   func testTurnkeyInvalidSessionMapsToTokenExpired() {
     let mapped = RainError.from(underlying: TurnkeySwiftError.invalidSession)

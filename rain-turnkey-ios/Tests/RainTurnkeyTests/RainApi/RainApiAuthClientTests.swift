@@ -54,7 +54,7 @@ struct RainApiAuthClientTests {
     _ = try await c.verifyOtp(token: "wat_1", otpId: "otp-1", encryptedOtpBundle: "enc")
     _ = try await c.signup(token: "wat_1", verificationToken: "vt", clientSignature: signature)
     _ = try await c.login(token: "wat_1", verificationToken: "vt", clientSignature: signature, subOrganizationId: nil)
-    _ = try await c.signupPasskey(token: "wat_2", attestation: .init(challenge: "ch", attestation: "att"))
+    _ = try await c.signupPasskey(token: "wat_2", attestation: Self.passkeyAttestation)
 
     let paths = recorder.requests.map { $0.url!.path }
     #expect(paths == [
@@ -92,6 +92,32 @@ struct RainApiAuthClientTests {
     #expect(signature?["signature"] as? String == "ab")
     #expect(body["verificationToken"] as? String == "vt")
     #expect(body["subOrganizationId"] as? String == "sub-9")
+  }
+
+  private static let passkeyAttestation = RainApiPasskeyAttestation(
+    challenge: "Y2hhbGxlbmdl",
+    attestation: .init(
+      credentialId: "cred-1", clientDataJson: "eyJ0eXBlIjoi", attestationObject: "o2NmbXQ",
+      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL", "AUTHENTICATOR_TRANSPORT_HYBRID"]
+    )
+  )
+
+  @Test("the passkey attestation is an object with exactly the four fields rain-api validates")
+  func passkeyAttestationShape() async throws {
+    let recorder = Recorder()
+    recorder.answers = [(200, #"{"subOrganizationId":"sub-2"}"#)]
+    _ = try await client(recorder).signupPasskey(token: "wat", attestation: Self.passkeyAttestation)
+
+    let body = recorder.json()
+    #expect(body["challenge"] as? String == "Y2hhbGxlbmdl")
+    let attestation = body["attestation"] as? [String: Any]
+    #expect(attestation?["credentialId"] as? String == "cred-1")
+    #expect(attestation?["clientDataJson"] as? String == "eyJ0eXBlIjoi")
+    #expect(attestation?["attestationObject"] as? String == "o2NmbXQ")
+    #expect(attestation?["transports"] as? [String] == ["AUTHENTICATOR_TRANSPORT_INTERNAL", "AUTHENTICATOR_TRANSPORT_HYBRID"])
+    // rain-api rejects unknown keys, so nothing else may ride along.
+    #expect(Set(attestation?.keys ?? []) == ["credentialId", "clientDataJson", "attestationObject", "transports"])
+    #expect(Set(body.keys) == ["challenge", "attestation"])
   }
 
   @Test("login without a sub-organization id omits the key rather than sending null")
@@ -140,9 +166,11 @@ struct RainApiAuthClientTests {
     arguments: [
       (400, "Invalid or expired code", RainApiAuthError.Kind.invalidCode),
       (400, "Verification failed", .verificationFailed),
+      (400, "This contact can't receive a code", .verificationFailed),
       (400, "Token was issued for a different email or phone", .verificationFailed),
       (401, "Token expired", .tokenRejected),
       (401, "Bad token", .tokenRejected),
+      (401, "Invalid tenant", .forbidden),
       (403, "Feature not enabled for tenant", .forbidden),
       (404, "No wallet exists for this contact", .noWallet),
       (409, "Token already used", .conflict),
