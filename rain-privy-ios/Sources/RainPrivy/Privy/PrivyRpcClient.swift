@@ -70,7 +70,12 @@ final class PrivyRpcClient: Sendable {
       return result
     } catch let error as RainError {
       throw error
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
+      // A cancelled URLSession call surfaces as a URL error, not CancellationError; the
+      // caller walking away must never be reported as a network or provider verdict.
+      if Task.isCancelled { throw CancellationError() }
       RainLogger.error("Rain SDK: Privy JSON-RPC failure for \(method): \(error)")
       throw RainError.from(underlying: error)
     }

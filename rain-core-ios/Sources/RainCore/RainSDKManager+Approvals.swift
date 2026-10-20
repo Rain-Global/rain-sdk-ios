@@ -43,6 +43,9 @@ extension RainSdkManager {
       let hash = try await walletProvider.sendTransaction(chainId: chainId, params: params)
       RainLogger.info("Rain SDK: Approval transaction submitted. Hash: \(hash)")
       return RainTokenApprovalResult(transactionHash: hash)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -87,6 +90,9 @@ extension RainSdkManager {
         rawAmount: rawAmount,
         decimals: resolvedDecimals
       )
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -106,6 +112,9 @@ extension RainSdkManager {
         amount: amount
       )
       return try await estimateTransactionFee(chainId: chainId, address: from, params: params)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }

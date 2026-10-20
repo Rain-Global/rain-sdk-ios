@@ -191,7 +191,9 @@ internal final class TurnkeySessionCoordinator: @unchecked Sendable {
         if Task.isCancelled { throw error }
         if isAuthFailure(error) {
           // A 401 means Turnkey rejected the request before executing it, so a single
-          // refresh-and-retry is safe even for sends.
+          // refresh-and-retry is safe for signing. NOT for the vendor's typed send calls, which
+          // poll inside the call — a 401 there may follow an accepted submit. The send paths
+          // therefore never let a post-submit 401 reach here (`sortedSendOutcome`).
           if refreshedAfterAuthFailure || !policy.autoRefresh { throw expiredError(error) }
           refreshedAfterAuthFailure = true
           try await performRefreshOrExpire()

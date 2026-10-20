@@ -55,6 +55,8 @@ struct ErrorMappingTests {
       (.invalidLoginCode, "RAIN_203"),
       (.networkError(underlying: underlying), "RAIN_301"),
       (.transactionPending(statusId: "status-1"), "RAIN_302"),
+      // 303/304 are retired; the 3xx sequence resumes at 305 on both platforms.
+      (.transactionOutcomeUnknown(details: "x"), "RAIN_305"),
       (.userRejected, "RAIN_401"),
       (.insufficientFunds(required: "1", available: "0"), "RAIN_402"),
       (.transactionSimulationFailed(underlying: underlying), "RAIN_403"),
@@ -90,6 +92,7 @@ struct ErrorMappingTests {
          .invalidLoginCode,
          .networkError,
          .transactionPending,
+         .transactionOutcomeUnknown,
          .userRejected,
          .insufficientFunds,
          .transactionSimulationFailed,

@@ -841,6 +841,22 @@ struct TokenApprovalTests {
     #expect(error?.code == "RAIN_501")
   }
 
+  /// The one error the wrap must never touch: a cancelled send is the caller walking away, and
+  /// RAIN_501 would tell them it settled as failed.
+  @Test("a cancelled send is not wrapped as a provider failure")
+  func cancellationIsNotWrapped() async throws {
+    let (manager, stub, _, _) = TestManagers.approvalManager()
+    stub.sendTransactionError = CancellationError()
+
+    await #expect(throws: CancellationError.self) {
+      _ = try await manager.approveTokenAllowance(
+        chainId: chainId,
+        contractAddress: usdc,
+        spender: spender
+      )
+    }
+  }
+
   // MARK: - getTokenAllowance
 
   @Test("the allowance is read for the wallet's own address by default")

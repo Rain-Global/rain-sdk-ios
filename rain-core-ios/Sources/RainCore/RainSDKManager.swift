@@ -131,6 +131,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
         RainLogger.info("Rain SDK: Withdrawal transaction submitted. Hash: \(txHash)")
         return txHash
       }
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw mapWithdrawalError(error)
     }
@@ -157,6 +160,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
         adminSignature: adminSignature,
         nonce: nonce
       )
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw mapWithdrawalError(error)
     }
@@ -176,6 +182,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
         data: data
       )
       return try await estimateTransactionFee(chainId: chainId, address: from, params: params)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -212,6 +221,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
         address: walletAddress,
         params: walletParams(parameters)
       )
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw mapWithdrawalError(error)
     }
@@ -232,6 +244,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
         address: parameters.from,
         params: walletParams(parameters)
       )
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw mapWithdrawalError(error)
     }
@@ -242,6 +257,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
   func getWalletAddress() async throws -> String {
     do {
       return try await walletProvider.address()
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -250,6 +268,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
   func getWalletAddress(chainId: Int) async throws -> String {
     do {
       return try await walletProvider.getAddress(chainId: chainId)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -275,6 +296,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
   func getBalance(chainId: Int, token: Token) async throws -> Balance {
     do {
       return try await walletProvider.getBalance(chainId: chainId, token: token)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -283,6 +307,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
   func getTokenBalances(chainId: Int) async throws -> [Balance] {
     do {
       return try await walletProvider.getBalances(chainId: chainId)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -332,6 +359,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
         offset: offset,
         order: order
       )
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -372,6 +402,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
 
       let hash = try await walletProvider.sendTransaction(chainId: chainId, params: params)
       return RainTokenTransferResult(transactionHash: hash)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }
@@ -431,6 +464,9 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
 
       let hash = try await walletProvider.sendTransaction(chainId: chainId, params: params)
       return RainTokenTransferResult(transactionHash: hash)
+    } catch is CancellationError {
+      // The caller walked away; the generic wrap would call that a provider failure.
+      throw CancellationError()
     } catch {
       throw RainError.from(underlying: error)
     }

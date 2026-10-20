@@ -8,7 +8,7 @@ import Web3
 /// Turnkey-based implementation of `WalletProvider`.
 /// Used when the SDK is initialized with `initializeTurnkey(...)`.
 internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedDataSignerProvider, RainTransactionFeeEstimatingProvider, RainSolanaTransfersProvider, @unchecked Sendable {
-  private enum AdapterConstants {
+  internal enum AdapterConstants {
     static let defaultNativeDecimals = 18
     static let defaultPollingAttempts = 30
     static let pollingIntervalNanoseconds: UInt64 = 1_000_000_000
@@ -33,7 +33,7 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
 
   private let turnkey: TurnkeyContextProtocol
   /// Guards every Turnkey call: expiry check, proactive refresh, refresh-on-401, backoff.
-  private let sessions: TurnkeySessionCoordinator
+  internal let sessions: TurnkeySessionCoordinator
   private let networkConfigsByChainId: [Int: NetworkConfig]
   private let walletAddressOverride: String?
   private let jsonRpcClient: JsonRpcClient
@@ -48,6 +48,9 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
 
   /// Pause between status/signature polls. Overridable in tests so timeout paths finish fast.
   internal var pollingIntervalNanoseconds: UInt64 = AdapterConstants.pollingIntervalNanoseconds
+
+  /// Serialises each send's submit-and-identify phase (see `TurnkeySendGate`).
+  internal let sendGate = TurnkeySendGate()
 
   // Once resolved, each address is stable for the adapter's lifetime, so cache it. EVM and
   // Solana accounts are cached independently — a Solana request never reads the EVM address.
@@ -140,7 +143,7 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
   }
 
   /// CAIP-2 for `chainId`: EIP-155 for EVM, genesis-hash form for Solana clusters.
-  private func caip2For(chainId: Int) -> String {
+  internal func caip2For(chainId: Int) -> String {
     ChainIDFormat.namespace(for: chainId).format(chainId: chainId)
   }
 
@@ -234,15 +237,25 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
     // Every EVM broadcast funnels through here — withdrawals, approvals, transfers and
     // host-composed calldata — so the chain gate on this funnel covers them all.
     try requireSendSupport(chainId: chainId)
-    // The body is rebuilt on a refresh-and-retry so the nonce and gas quotes stay fresh.
-    let statusId = try await sessions.executeWrite { session, client in
-      let sendInput = try await self.buildTurnkeySendTransactionBody(
-        session: session,
-        client: client,
-        chainId: chainId,
-        params: params
-      )
-      return try await client.ethSendTransaction(sendInput).sendTransactionStatusId
+    // The body is rebuilt on a refresh-and-retry so the nonce and gas quotes stay fresh — that
+    // retry can only happen BEFORE the submit: `sortedSendOutcome` turns every post-submit
+    // failure into an outcome, so no 401 from the vendor's in-call poll reaches the coordinator.
+    let statusId = try await gatedSend {
+      let outcome = try await sessions.executeWrite { session, client in
+        let sendInput = try await self.buildTurnkeySendTransactionBody(
+          session: session,
+          client: client,
+          chainId: chainId,
+          params: params
+        )
+        return try await self.sortedSendOutcome(
+          kind: .evm,
+          matches: Self.evmIntentMatcher(sendInput)
+        ) {
+          try await client.ethSendTransaction(sendInput).sendTransactionStatusId
+        }
+      }
+      return try await resolveStatusId(from: outcome, kind: .evm)
     }
     return try await pollForTransactionHash(sendTransactionStatusId: statusId)
   }
@@ -1058,9 +1071,11 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
     // Baseline for the signature recovery below: the wallet's newest signature before this send.
     let priorSignature = try? await solanaRpcClient.getLatestSignature(chainId: chainId, address: from)
 
-    let statusId = try await sessions.executeWrite { session, client in
-      try await client.solSendTransaction(
-        TSolSendTransactionBody(
+    // Post-submit failures become outcomes inside the write (see `sortedSendOutcome`), so the
+    // coordinator's refresh-and-retry can never re-run an accepted submit.
+    let statusId = try await gatedSend {
+      let outcome = try await sessions.executeWrite { session, client in
+        let body = TSolSendTransactionBody(
           organizationId: session.organizationId,
           caip2: self.caip2For(chainId: chainId),
           recentBlockhash: unsigned.recentBlockhash,
@@ -1071,7 +1086,14 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
           sponsor: self.sponsorsFees(chainId: chainId),
           unsignedTransaction: unsigned.transactionHex
         )
-      ).sendTransactionStatusId
+        return try await self.sortedSendOutcome(
+          kind: .solana,
+          matches: Self.solanaIntentMatcher(body)
+        ) {
+          try await client.solSendTransaction(body).sendTransactionStatusId
+        }
+      }
+      return try await resolveStatusId(from: outcome, kind: .solana)
     }
 
     // The Turnkey SDK returns the Solana signature in the send-status response once Included.
@@ -1132,8 +1154,11 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
     sendTransactionStatusId: String
   ) async throws -> String? {
     for attempt in 0..<AdapterConstants.defaultPollingAttempts {
-      // A session dying mid-poll stops the status reads, not the submitted transaction:
-      // returning nil lets the caller recover the signature from chain.
+      // Turnkey has the transaction; a failed status READ — the session dying, a dropped
+      // connection, a 5xx past the coordinator's retries — stops only our view of it. It ends
+      // as `transactionPending` with the status id, never as a failure (which would invite a
+      // second send) and never as a nil that the chain fallback could turn into the status id
+      // reported as a signature. Only cancellation passes through.
       let status: TGetSendTransactionStatusResponse
       do {
         status = try await sessions.executeRead { session, client in
@@ -1144,8 +1169,11 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
             )
           )
         }
-      } catch let error as RainError where error == .tokenExpired {
-        return nil
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        if Task.isCancelled { throw CancellationError() }
+        throw RainError.transactionPending(statusId: sendTransactionStatusId)
       }
 
       if let failure = Self.sendFailure(
@@ -1390,9 +1418,10 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
   ) async throws -> String {
     for attempt in 0..<Self.AdapterConstants.defaultPollingAttempts {
       // Session-guarded per poll: a session expiring mid-poll refreshes instead of aborting a
-      // transaction that was already submitted. If the session dies for good, the status id
-      // must survive — losing it here would invite a duplicate send after re-auth. The expiry
-      // hook has already fired by then.
+      // transaction that was already submitted. If a status READ fails for good — the session
+      // dying, a dropped connection, a 5xx past the coordinator's retries — the status id must
+      // survive: losing it here would invite a duplicate send. Turnkey has the transaction; only
+      // our view of it stopped. Only cancellation passes through.
       let status: TGetSendTransactionStatusResponse
       do {
         status = try await sessions.executeRead { session, client in
@@ -1403,7 +1432,10 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
             )
           )
         }
-      } catch let error as RainError where error == .tokenExpired {
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        if Task.isCancelled { throw CancellationError() }
         throw RainError.transactionPending(statusId: sendTransactionStatusId)
       }
 

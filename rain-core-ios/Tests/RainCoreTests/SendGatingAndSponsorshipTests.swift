@@ -102,6 +102,24 @@ struct SendGatingAndSponsorshipTests {
     #expect(stub.requireSendSupportCalls == [1])
   }
 
+  /// `mapWithdrawalError` wraps everything it is handed; cancellation must never reach it.
+  @Test("a cancelled withdrawal reaches the caller as CancellationError, not RAIN_501")
+  func cancelledWithdrawalIsNotWrapped() async throws {
+    let (manager, stub) = try await TestManagers.stubProviderManager()
+    stub.sendTransactionError = CancellationError()
+
+    await #expect(throws: CancellationError.self) {
+      _ = try await manager.withdrawCollateral(
+        chainId: 1,
+        addresses: TestFixtures.defaultWithdrawAddresses,
+        amount: 1,
+        decimals: 6,
+        adminSignature: TestFixtures.adminSignature(),
+        nonce: 1
+      )
+    }
+  }
+
   @Test("a sponsored provider still gets the chain's withdrawal-fee estimate — hosts show the saving")
   func sponsoredEstimateQuotesChainCost() async throws {
     let (manager, stub) = try await TestManagers.stubProviderManager(stub: FeeEstimatingStubWalletProvider())

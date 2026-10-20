@@ -91,7 +91,7 @@ Arbitrum, Optimism, BNB Chain, Monad, Tempo, Robinhood Chain (mainnets and their
 Solana mainnet + devnet. The full list lives in `TurnkeyBroadcastChains` and follows
 [Turnkey's broadcasting docs](https://docs.turnkey.com/features/transaction-management/broadcasting).
 A send on any other chain — Avalanche, Celo, ZKsync, Solana testnet — fails closed with
-`RainError.chainNotSupported` (`RAIN_105`) **before** any contract read or signing prompt:
+`RainError.chainNotSupported` (`RAIN_104`) **before** any contract read or signing prompt:
 `sendNative`, `sendToken`, `withdrawCollateral` and `approveTokenAllowance` all check the gate
 first. Reads and signing are not gated: balances, history, fee estimates and `prepareWithdrawal`
 work on every chain with an RPC endpoint registered — Turnkey signs anywhere, it just cannot
@@ -116,6 +116,63 @@ organization where it is not, Turnkey rejects sponsored sends — pass `sponsorG
 and the wallet pays its own fees with the SDK's own nonce/gas quoting. With `sponsorGas` on the
 provider advertises `Capability.gasSponsorship`.
 
+## After a send is accepted
+
+Every send — `sendNative`, `sendToken`, `withdrawCollateral`, `approveTokenAllowance`, raw
+`sendTransaction`, EVM or Solana — goes through Turnkey's `ethSendTransaction` /
+`solSendTransaction`. Those vendor calls submit the activity and then **poll it inside the call**
+(`ActivityPollerConfig`, 1 s × 3 by default; the Swift SDK does not expose it on `TurnkeyContext`,
+so the SDK cannot widen it). Their response types carry a non-optional `sendTransactionStatusId`
+that only exists once the activity is `COMPLETED`; for any other ending the vendor decodes the
+raw activity into that type, the key is missing, and the call throws a `DecodingError` that has
+lost the activity (swift-sdk 4.0.0, verified). Left alone, a slow sponsored send would look like
+a generic failure with nothing to resume from — and a 401 from the vendor's in-call poll would be
+indistinguishable from a 401 on the submit, so a plain refresh-and-retry could submit twice.
+
+The adapter therefore owns the ending. After the submit a send has exactly four:
+
+1. **A status id** — the activity completed inside the vendor's poll. The adapter polls
+   `get_send_transaction_status` for the hash (EVM) or signature (Solana), up to 30 s. A
+   `FAILED` status carrying a decoded revert is `withdrawalRevertedByNetwork` / `RAIN_405` on a
+   withdrawal (`providerError` elsewhere); a poll that runs out is `transactionPending` /
+   `RAIN_302` carrying the **status id**. So is a status *read* that fails for good — the
+   session dying, a dropped connection, a 5xx past the coordinator's retries: Turnkey has the
+   transaction, only our view of it stopped.
+2. **An accepted activity** — the vendor threw its decode failure, or answered 401, 408 or
+   429, after Turnkey accepted the activity (the Swift client throws the identical error for
+   the submit and for its in-call poll, so none of those can be read as a refusal). The adapter
+   reads the activity back from the activity log (newest `ETH_SEND_TRANSACTION` /
+   `SOL_SEND_TRANSACTION` created since the submit, matched on the intent: `from` + `to` +
+   calldata + value + the account or gas-station nonce, or signer + cluster + the unsigned
+   transaction) and waits on it by id with `get_activity` — ten reads, one per second.
+   `COMPLETED` joins ending 1; `FAILED` / `REJECTED` is `providerError` / `RAIN_501` carrying
+   Turnkey's reason (never `userRejected`); still executing after the budget is
+   `transactionPending` / `RAIN_302` carrying the **activity id** — no SDK call takes it, but
+   it equals `uniqueId` on the history row for the send. Any read that fails mid-wait ends the
+   same way, with the activity id.
+3. **A refusal** — Turnkey answered the submit with a 4xx other than 401 / 408 / 429. Nothing
+   was executed; the error leaves as itself and maps as usual (403 → `unauthorized`, …).
+4. **Unknown fate** — a 5xx to the submit, a transport failure, an undecodable answer, or an
+   accepted-activity read-back that finds nothing. The send may still land, and there is no
+   identifier to resume from: `transactionOutcomeUnknown` / `RAIN_305`. It carries no cause on
+   purpose, so no layer above can read an HTTP status off it and retry. Read history or the
+   balance before sending again.
+
+What this guarantees a host: **the SDK never submits a send twice.** A 401 on a send is not
+refreshed-and-retried (unlike signing, where it is): the activity is read back instead, and if
+nothing is found the ending is `RAIN_305` rather than a second activity. `RAIN_501` from a
+Turnkey send therefore always means *settled, nothing moved*. Sends on one provider are
+serialised through their submit-and-identify phase (a small per-adapter gate), so two
+overlapping sends cannot both read back the same "newest" activity; the 30 s status poll runs
+outside the gate. Cancelling the task that called the send surfaces `CancellationError` at
+every stage, never an outcome — but the send may already have gone out, so a host that cancels
+should treat it like `RAIN_305`.
+
+Same four endings and codes as rain-sdk-android. Android takes the activity from the Kotlin
+client's typed `ActivityNotCompleted` error (http 2.2.0); the Swift client has no equivalent
+yet, hence the read-back. Vendor request filed: throw a typed error carrying the `v1Activity`
+for non-completed statuses and expose `ActivityPollerConfig` on `TurnkeyContext`.
+
 ## Solana notes
 
 The Turnkey adapter is the SDK's multi-chain provider (it advertises `.multiChain`): Solana sentinel chain ids (`RainChain.solanaMainnet` 900 / `solanaDevnet` 901 / `solanaTestnet` 902) route `getWalletAddress(chainId:)`, balances, `sendNative`, `sendToken`, `withdrawCollateral`, and `getTransactions` to the Turnkey Solana account.
@@ -125,7 +182,7 @@ The Turnkey adapter is the SDK's multi-chain provider (it advertises `.multiChai
 - SPL balances come from Turnkey's `get-balances` where it indexes the cluster. Where it doesn't (devnet in particular, where Turnkey answers with SOL only or errors), `getTokenBalances` discovers the wallet's holdings from the node instead: `getTokenAccountsByOwner` against both token programs, summed per mint. Solana has no token registry, so nothing has to be registered up front — but symbol / name stay `nil` unless the mint is registered, since that metadata lives off chain (Metaplex).
 - `getTransactions` is sourced from Turnkey's activity log (`ACTIVITY_TYPE_SOL_SEND_TRANSACTION`), matching the EVM path: it lists only what this wallet sent through Turnkey — no receives — and the row's hash is the Turnkey status id, not an explorer-resolvable signature. Both transfer shapes are decoded out of the activity's unsigned transaction: a System transfer becomes a native row (`category: "external"`, `asset: "SOL"`), an SPL `TransferChecked` a token row (`category: "token"`, mint + raw amount + decimals in `rawContract`, `asset` only when the mint is registered — Solana keeps symbols off chain). An SPL transfer's recipient is a token account, so the wallet behind it comes from the transaction's account-creation instruction when present and from one `getAccountInfo` otherwise; if neither resolves, the token account itself is reported rather than dropping the row.
 - Turnkey's API hex-decodes the `unsignedTransaction` field (despite the type documenting base64), so Rain serializes the transfer message as hex.
-- Turnkey returns a send-status id rather than an on-chain signature; Rain polls the status for the signature and, as a defensive fallback, recovers it from the chain via `getSignaturesForAddress`. That applies to `sendNative` / `sendToken` return values — history rows always carry the status id, since the activity log has no signature.
+- Turnkey returns a send-status id rather than an on-chain signature; Rain polls the status for the signature and, as a defensive fallback, recovers it from the chain via `getSignaturesForAddress`. That applies to `sendNative` / `sendToken` return values — history rows always carry the status id, since the activity log has no signature. A send the vendor's own poll gives up on first is read back and waited on by activity id — see [After a send is accepted](#after-a-send-is-accepted).
 - **Collateral withdrawal** works on Solana too. Rain's collateral program authorizes a withdrawal differently from the EVM contracts: instead of EIP-712 calldata, the coordinator executor signs a keccak-encoded withdraw message off chain (that is the admin signature the Rain API returns). Core composes a two-instruction transaction — a native ed25519-program instruction proving the executor signed that exact message, then the program's `withdraw_single_signer_collateral_asset` — reading the collateral account, its coordinator's executors, and the mint's token program from the chain, and deriving the collateral-authority PDA and associated token accounts locally. It simulates the result and hands the bytes to the adapter, which signs them **as-is**: re-serializing would invalidate the embedded signature. `withdrawCollateral`'s `proxyAddress` is the collateral account and `tokenAddress` is the SPL mint; only single-signer collateral is supported.
 
 ## Signing
@@ -145,7 +202,8 @@ Turnkey-specific errors are mapped into the standard `RainError` hierarchy (see 
 | `TurnkeySwiftError.invalidSession` | `RainError.tokenExpired` |
 | `TurnkeyRequestError.apiError` with HTTP 401 | `RainError.tokenExpired` |
 | `TurnkeyRequestError.apiError` with HTTP 403 | `RainError.unauthorized` |
-| `TurnkeyRequestError.network` | `RainError.networkError` |
+| `TurnkeyRequestError.network` | `RainError.networkError` (reads); on a send, any failure after the submit is `RainError.transactionOutcomeUnknown` — see [After a send is accepted](#after-a-send-is-accepted) |
+| `DecodingError` from `ethSendTransaction` / `solSendTransaction` | The activity was accepted but not `COMPLETED` within the vendor's poll; read back and waited on — see [After a send is accepted](#after-a-send-is-accepted) |
 | Config / setup errors (`invalidConfiguration`, `missingAuthProxyConfiguration`, `invalidRefreshTTL`, `publicKeyMissing`, `signingNotSupported`, `invalidJWT`, `invalidResponse`, `keyAlreadyExists`, `keyNotFound`, `keyIndexFailed`, `keychainAddFailed`, `oauthInvalidURL`, `oauthMissingIDToken`) | `RainError.internalError` |
 | Wrapper errors (`failedToSignPayload`, `failedToFetchWallets`, …) | Unwrapped recursively; e.g. a wrapped `ASAuthorizationError.canceled` (passkey prompt dismissed) surfaces as `RainError.userRejected` |
 | Anything else | `RainError.providerError` |
@@ -188,9 +246,11 @@ What every wallet call now does:
    refresh that fails for a non-auth reason (a network blip) proceeds on the current session
    while it is still valid; only Turnkey rejecting the refresh, or a session already past
    `exp`, is treated as a death.
-3. **Refresh-on-401** — a call rejected with HTTP 401 / `invalidSession` is refreshed and
-   retried exactly once. A 401 means Turnkey rejected the request before executing it, so this
-   is safe for sends too. A second 401 surfaces as `RainError.tokenExpired`.
+3. **Refresh-on-401** — a read or a signing call rejected with HTTP 401 / `invalidSession` is
+   refreshed and retried exactly once (a 401 there means Turnkey rejected the request before
+   executing it). A second 401 surfaces as `RainError.tokenExpired`. **Sends are the exception**:
+   the vendor's send call polls inside the call, so a 401 may follow an accepted submit; a send
+   is never re-run — see [After a send is accepted](#after-a-send-is-accepted).
 4. **Transient backoff** — idempotent reads (balances, history, transaction-status polls)
    retry HTTP 5xx/429/408 and network failures with exponential backoff. Sends and signing
    are never retried on transient failures.

@@ -589,7 +589,7 @@ struct TurnkeyAdapterTests {
     #expect(builder.approveCalls[0].amount == RainTokenAllowance.unlimitedRawAmount)
   }
 
-  @Test("sendNative with Turnkey throws when ethSendTransaction fails")
+  @Test("sendNative with Turnkey reports an unclassifiable send failure as an unknown outcome")
   func testSendNativeTokenTurnkeyEthSendError() async throws {
     await MockURLProtocol.install()
     defer { MockURLProtocol.reset() }
@@ -605,7 +605,31 @@ struct TurnkeyAdapterTests {
 
     let (manager, _, _) = TestManagers.turnkeyManager(turnkey: mockTurnkey)
 
-    await #expect(throws: RainError.providerError(underlying: NSError(domain: "x", code: 0))) {
+    // The vendor polls inside the send call, so a failure it cannot name may follow an accepted
+    // submit: RAIN_305, never a settled providerError that would invite a second send.
+    await #expect(throws: RainError.transactionOutcomeUnknown(details: "")) {
+      _ = try await manager.sendNative(
+        chainId: 1,
+        to: TestFixtures.recipientAddress,
+        amount: 1.0
+      )
+    }
+    #expect(client.ethSendTransactionCalls.count == 1)
+  }
+
+  @Test("a cancelled send reaches the RainClient caller as CancellationError, not RAIN_501")
+  func testSendNativeCancellationReachesTheCaller() async throws {
+    await MockURLProtocol.install()
+    defer { MockURLProtocol.reset() }
+    stubSendTransactionRPCs()
+
+    let mockTurnkey = MockTurnkey()
+    let client = mockTurnkey.turnkeyClient as! MockTurnkeyClient
+    client.ethSendTransactionError = CancellationError()
+
+    let (manager, _, _) = TestManagers.turnkeyManager(turnkey: mockTurnkey)
+
+    await #expect(throws: CancellationError.self) {
       _ = try await manager.sendNative(
         chainId: 1,
         to: TestFixtures.recipientAddress,
