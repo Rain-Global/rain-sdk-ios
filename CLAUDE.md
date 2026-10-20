@@ -170,6 +170,34 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   normalized string IS the account identity: Android must lowercase identically — flag for
   parity. Any pre-fix account created with a mixed-case email is now unreachable by that
   email (beta only, no external users).
+- PR H1 (IN PROGRESS 2026-10-20, branch volo/feature/rain-api-auth-client) — managed auth moves
+  OFF Turnkey's Auth Proxy onto rain-api (`/v1/issuing/embedded-wallets`), RainWallet only,
+  HARD CUTOVER (decision 2026-10-20: no proxy path kept; beta Auth-Proxy accounts become
+  unreachable — rain-api never recorded their sub-orgs). Host surface (PR H2): `RainWalletConfig`
+  gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz) / .custom(URL)`
+  and `authTokenProvider: (RainWalletContact?) async throws -> String` — the PARTNER BACKEND
+  mints the wallet auth token (`wat_…`, 10-min TTL, bound to one contact, contact-less only for
+  passkey signup, consumed by /login and /signup/passkey but NOT /signup) with its Api-Key via
+  `POST /auth-tokens`; the device never sends a contact. Device endpoints (Bearer wat_): /otp/init,
+  /otp/verify, /signup (idempotent, returns subOrganizationId, no session), /login (404 = no
+  wallet → signup then login again on the SAME token + verification token; 900 s session; EVM
+  address LOWERCASED), /signup/passkey. Rate limit 30/5 min per IP; only DEV has Turnkey
+  configured (elsewhere 503). After login everything is device→Turnkey as today.
+  VENDOR FACTS (swift-sdk 4.0.0, verified in source 2026-10-20) — all PUBLIC: the device does
+  what the proxy flow did: `TurnkeyContext.createKeyPair()` (keychain, returns hex pubkey);
+  `TurnkeyCrypto.encryptOtpCodeToBundle(otpCode:otpEncryptionTargetBundle:publicKey:)`; Turnkey
+  embeds that pubkey in the verification token, and `ClientSignature.forLogin(verificationToken:)`
+  / `forSignup(verificationToken:email:phoneNumber:)` (TurnkeySwift/TurnkeyUtils) READ IT BACK
+  OUT of the token and return `(message, clientSignaturePublicKey)` — nothing is threaded by us;
+  `Stamper(apiPublicKey:)` (product `TurnkeyStamper`, NOT yet linked by RainTurnkey) loads the
+  matching private key and `sign(payload:format: .raw)`; `storeSession(jwt:sessionKey:)`.
+  rain-api's clientSignature JSON = vendor `v1ClientSignature` shape (`publicKey, scheme:
+  "CLIENT_SIGNATURE_SCHEME_API_P256", message, signature`). `TurnkeyContext.configure` keeps
+  organizationId + rpId; `authProxyConfigId` goes in PR H4. Backend asks outstanding: /login
+  doesn't revoke other sessions (we rely on invalidateExisting today → B7); passkey signup
+  returns no session (two biometric prompts); attaching an already-walleted contact → next
+  login 500; errors carry no machine code (string matching); 429 has no RAIN code (propose
+  RAIN_204 tooManyAttempts cross-platform).
 - PR E (IN PROGRESS 2026-09-17, branch volo/feature/handle-gas-sponsorship), gas sponsorship +
   fail-closed sends on chains Turnkey cannot broadcast on — a mirror of Android's WALL-31 and its
   follow-ups (TurnkeyBroadcastChains, minimal sponsored payloads with the

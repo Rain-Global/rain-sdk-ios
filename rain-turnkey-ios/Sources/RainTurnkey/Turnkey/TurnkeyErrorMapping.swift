@@ -29,6 +29,12 @@ enum TurnkeyErrorMapping {
     if let turnkeyRequestError = error as? TurnkeyRequestError {
       return mapTurnkeyRequestError(turnkeyRequestError)
     }
+    // rain-api's embedded-wallet auth refusals (managed mode). Registered here rather than
+    // relying on call sites remembering `.rainError`: an unmapped one would fall through
+    // `RainError.from` as a generic RAIN_501 and a wrong code would stop being RAIN_203.
+    if let rainApiAuthError = error as? RainApiAuthError {
+      return rainApiAuthError.rainError
+    }
     return nil
   }
 
