@@ -90,9 +90,11 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   gains a managed init (`organizationId` + `authProxyConfigId`) alongside the existing BYO
   authenticated-context init (kept, non-breaking). Managed mode: the SDK calls
   `TurnkeyContext.configure` itself (singleton, process-guarded) and `TurnkeyProvider` exposes
-  auth — email OTP only: `sendLoginCode(email:)` / `confirmLoginCode(_:)` (initOtp → verifyOtp +
-  completeOtp under a per-attempt session key, login-or-signup; wrong code = `invalidLoginCode`
-  RAIN_203, never a logout), `logout()`, `authState` publisher mapped to a Rain-owned enum.
+  auth — email OTP only: `sendLoginCode(email:)` / `confirmLoginCode(_:)` (ORIGINALLY vendor
+  initOtp → verifyOtp + completeOtp via the Auth Proxy, under a per-attempt session key,
+  login-or-signup; SUPERSEDED by rain-api in PR H2 — same per-attempt-key dance, different
+  backend; wrong code = `invalidLoginCode` RAIN_203, never a logout), `logout()`, `authState`
+  publisher mapped to a Rain-owned enum.
   Provisioning: ONE wallet with both the Ethereum and Solana accounts (single seed; atomic at
   signup via `createSubOrgParams.customWallet`, backfilled onto the existing seed via
   `create_wallet_accounts` otherwise) — a cross-platform contract with Android. Auth calls in
@@ -170,12 +172,29 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   normalized string IS the account identity: Android must lowercase identically — flag for
   parity. Any pre-fix account created with a mixed-case email is now unreachable by that
   email (beta only, no external users).
-- PR H1 (IN PROGRESS 2026-10-20, branch volo/feature/rain-api-auth-client) — managed auth moves
-  OFF Turnkey's Auth Proxy onto rain-api (`/v1/issuing/embedded-wallets`), RainWallet only,
-  HARD CUTOVER (decision 2026-10-20: no proxy path kept; beta Auth-Proxy accounts become
-  unreachable — rain-api never recorded their sub-orgs). Host surface (PR H2): `RainWalletConfig`
+- PR H1 (DONE 2026-10-20, #45: `RainApiAuthClient`) + PR H2 (IN PROGRESS 2026-10-21, branch
+  volo/feature/rain-api-code-login) — managed auth moves OFF Turnkey's Auth Proxy onto rain-api
+  (`/v1/issuing/embedded-wallets`), RainWallet only, HARD CUTOVER (decision 2026-10-20: no
+  proxy path kept; beta Auth-Proxy accounts become unreachable — rain-api never recorded their
+  sub-orgs). H2 SHAPE: `TurnkeyContextProtocol` lost `sendOtp`/`completeOtp`/`verifyOtpToken`
+  and gained the device-crypto seams (`createOtpKeyPair`, `encryptOtpCode`,
+  `clientSignatureForLogin/ForSignup`, `signClientMessage`, `storeTurnkeySession`) so the
+  crypto stays mockable; `TurnkeyManagedAuthController` takes `api: RainApiAuthClientProtocol`
+  + `tokenProvider`, keeps its per-attempt-key/select/purge dance, and flows: mint token →
+  /otp/init → (confirm) fresh key → encrypt → /otp/verify (400 invalid code keeps the attempt,
+  any other failure ends it) → forLogin+sign → /login; `.noWallet` → forSignup+sign (contact
+  only) → /signup → /login again with subOrganizationId, same token + verification token.
+  `.tokenRejected` mid-flow → ONE renewal from the host (`withTokenRetry`). Contact attach =
+  token for the NEW contact → init/verify → vendor `updateUserEmail/Phone` with rain-api's
+  verification token. `TurnkeyConfig` managed init requires `authBackend:
+  TurnkeyManagedAuthBackend(baseURL:tokenProvider:)` (SPI). `invalidateExisting` is GONE: a
+  second device no longer logs the first out (test plan B7 now expects success — backend ask).
+  Passkey SIGNUP still goes through the vendor/proxy until PR H3; `authProxyConfigId` stays
+  until H4. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
+  comment) feeds `prepareRainWallet`'s provider. Host surface: `RainWalletConfig`
   gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz) / .custom(URL)`
-  and `authTokenProvider: (RainWalletContact?) async throws -> String` — the PARTNER BACKEND
+  (DEFAULT .production) and `authTokenProvider: (RainWalletContact?) async throws -> String`
+  (nil → code flows throw invalidConfig, passkey login works) — the PARTNER BACKEND
   mints the wallet auth token (`wat_…`, 10-min TTL, bound to one contact, contact-less only for
   passkey signup, consumed by /login and /signup/passkey but NOT /signup) with its Api-Key via
   `POST /auth-tokens`; the device never sends a contact. Device endpoints (Bearer wat_): /otp/init,

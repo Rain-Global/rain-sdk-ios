@@ -237,16 +237,29 @@ final class RainSDKService: ObservableObject {
   /// Authentication (`sendLoginCode` / `confirmLoginCode`) runs on it before Rain is initialized.
   private(set) var rainWalletProvider: RainWallet.RainProvider?
 
-  /// Creates the Rain wallet provider. The SDK embeds the backend identity and owns the
-  /// email-OTP flow — nothing to configure beyond the hooks.
+  /// Creates the Rain wallet provider. The SDK embeds the backend identity and owns the code
+  /// login flow; the host supplies the Rain environment and a way to obtain wallet auth tokens.
+  ///
+  /// The token provider here calls Rain's `/auth-tokens` with the Api-Key entered on the Home
+  /// screen — DEMO ONLY. In a real app that call runs on your backend and this closure fetches
+  /// the token from there. Without Rain API credentials the code flows throw `invalidConfig`;
+  /// passkey login still works.
   @discardableResult
   func prepareRainWallet(
     passkeyDomain: String? = "passkeys.uptop.xyz",
     onSessionExpired: (@Sendable () -> Void)? = nil
   ) -> RainWallet.RainProvider {
     RainLogger.isEnabled = true
+    let rainApi = self.rainApi
     let provider = RainWallet.RainProvider(
-      RainWalletConfig(passkeyDomain: passkeyDomain, onSessionExpired: onSessionExpired)
+      RainWalletConfig(
+        environment: SampleEnvironment.rainApi == .sandbox ? .sandbox : .production,
+        authTokenProvider: rainApi.map { api in
+          { contact in try await api.mintWalletAuthToken(contact: contact) }
+        },
+        passkeyDomain: passkeyDomain,
+        onSessionExpired: onSessionExpired
+      )
     )
     rainWalletProvider = provider
     return provider

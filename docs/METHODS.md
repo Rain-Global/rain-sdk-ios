@@ -816,7 +816,7 @@ for programmatic handling — the same codes as the Android SDK.
 | `RAIN_103` | `invalidRpcUrl(_:)` | RPC URL could not be parsed as a valid URL. |
 | `RAIN_104` | `chainNotSupported(chainId:details:)` | The active wallet provider cannot broadcast on this chain, so a send (transfer, withdrawal, approval) was refused before any signing or network work. Reads — balances, history, fee estimates — are not gated. E.g. Turnkey's managed broadcast does not cover Avalanche. |
 | `RAIN_201` | `tokenExpired` | Provider session token expired or invalid. |
-| `RAIN_202` | `unauthorized(details:)` | The backend rejected the caller's credentials or permissions; `details` names which backend and why. |
+| `RAIN_202` | `unauthorized(details:)` | The backend rejected the caller's credentials or permissions; `details` names which backend and why. On a Rain wallet code login: the wallet auth token was rejected even after one renewal from your `authTokenProvider`, or the tenant cannot use embedded wallets. |
 | `RAIN_203` | `invalidLoginCode` | The one-time login code was rejected (wrong, expired, or already used) — ask the user to retype it or request a new one. Distinct from `RAIN_201`, which means an established session died. |
 | `RAIN_301` | `networkError(underlying:)` | Network/connectivity failure. |
 | `RAIN_302` | `transactionPending(statusId:)` | A send was accepted but its hash is not known yet; resume polling with `statusId`, do not resend. On a Turnkey or Rain wallet send, EVM or Solana, whose activity the backend accepted without a readable status id yet, `statusId` is the backend's activity id — no call takes it, but it matches the history row for the send. |

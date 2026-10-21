@@ -1,5 +1,6 @@
 import Foundation
 import RainCore
+import RainWallet // RainWalletContact, for the wallet auth token mint
 
 // The Rain issuing API is the HOST's responsibility, not the SDK's: the SDK builds and sends
 // transactions, while the data those transactions need — the user's collateral contract and
@@ -201,6 +202,37 @@ final class RainApiClient: Sendable {
       signature: signatureData,
       expiresAt: response.expiresAt ?? ""
     )
+  }
+
+  /// `POST /v1/issuing/embedded-wallets/auth-tokens` — mints a wallet auth token (`wat_…`) the
+  /// Rain wallet's code login rides on. Bound to `contact`; `nil` mints a contact-less token,
+  /// which only passkey signup accepts. Ten-minute TTL, consumed by login.
+  ///
+  /// DEMO ONLY. This call needs the program Api-Key, which belongs on YOUR BACKEND: in a real
+  /// app the backend mints the token and the app's `authTokenProvider` fetches it from there.
+  /// The sample keeps the key on the Home screen so the flow can be exercised end to end.
+  func mintWalletAuthToken(contact: RainWalletContact?) async throws -> String {
+    struct ContactDto: Encodable { let type: String; let value: String }
+    struct Body: Encodable { let contact: ContactDto? }
+    struct Response: Decodable { let token: String }
+
+    let contactDto: ContactDto? = switch contact {
+    case .email(let value): ContactDto(type: "email", value: value)
+    case .phone(let value): ContactDto(type: "phone", value: value)
+    case nil: nil
+    }
+    var request = URLRequest(url: url(path: "v1/issuing/embedded-wallets/auth-tokens"))
+    request.httpMethod = "POST"
+    applyHeaders(&request)
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try JSONEncoder().encode(Body(contact: contactDto))
+
+    let data = try await execute(request, operation: "mint wallet auth token")
+    do {
+      return try decoder.decode(Response.self, from: data).token
+    } catch {
+      throw RainApiError.decoding(error)
+    }
   }
 
   // MARK: Wire DTOs
