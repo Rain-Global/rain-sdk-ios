@@ -18,14 +18,18 @@ struct RainWalletNeutralityTests {
   @MainActor
   private static func integrationSurface() async throws {
     let anchor = ASPresentationAnchor()
+    let tokenProvider: RainWalletAuthTokenProvider = { (contact: RainWalletContact?) in "wat_…" }
     let provider = RainProvider(
       RainWalletConfig(
+        environment: .sandbox,
+        authTokenProvider: tokenProvider,
         passkeyDomain: "passkeys.example.com",
         sessionPolicy: RainWalletSessionPolicy(autoRefresh: true),
         onSessionExpired: {}
       )
     )
-    let _: RainProvider = RainProvider() // zero-config: the backend identity is embedded
+    let _: RainWalletEnvironment = .custom(URL(string: "https://staging.example")!)
+    let _: RainProvider = RainProvider() // zero-config: passkey login only, production
 
     // Auth + session surface, fully typed with module-owned names.
     let _: RainWalletAuthState = provider.currentAuthState()

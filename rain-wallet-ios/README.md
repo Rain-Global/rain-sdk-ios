@@ -2,16 +2,28 @@
 
 The Rain-branded wallet provider for the modular Rain iOS SDK.
 
-The wallet backend identity is embedded in the SDK — hosts configure nothing. The SDK owns the
-whole wallet lifecycle: authentication (email one-time codes), wallet provisioning (EVM + Solana
-on first login), session management, and the full `RainClient` surface. Linking
+The wallet backend identity is embedded in the SDK. The SDK owns the whole wallet lifecycle:
+authentication (one-time codes over email or SMS, and passkeys), wallet provisioning (EVM +
+Solana on first login), session management, and the full `RainClient` surface. Linking
 `rain-wallet-ios` is all an app needs: `RainCore` comes transitively (and is re-exported, so
 `import RainWallet` surfaces the full SDK).
+
+Code login runs against Rain's API and needs one thing from you: a **wallet auth token**, which
+**your backend** mints with your Rain Api-Key (`POST /v1/issuing/embedded-wallets/auth-tokens`,
+body `{ "contact": { "type": "email" | "phone", "value": "…" } }`) and hands to the app. The
+token lives ten minutes, is bound to that one contact, and is consumed by login — so the SDK
+asks for a fresh one at the start of every code flow through `authTokenProvider`. Never put the
+Api-Key in the app.
 
 ```swift
 import RainWallet   // re-exports RainCore
 
-let provider = RainProvider()   // optionally RainProvider(RainWalletConfig(onSessionExpired:...))
+let provider = RainProvider(RainWalletConfig(
+    environment: .sandbox,                                 // .production is the default
+    authTokenProvider: { contact in                        // called per code flow
+        try await myBackend.walletAuthToken(for: contact)  // your backend → Rain /auth-tokens
+    }
+))
 
 // Reuse a restored session, or run the login-code flow (email or SMS):
 await provider.awaitSessionRestore()
@@ -70,6 +82,13 @@ SDK returns the same formats.
 
 Notes:
 
+- Without an `authTokenProvider`, `sendLoginCode` and `sendContactVerificationCode` throw
+  `invalidConfig`; passkey login still works, so `RainProvider()` is valid for passkey-only apps.
+- Wallets are per partner: the same email in two partner apps is two wallets.
+- Logging in on a second device does not log the first one out.
+- Errors: a wrong code is `invalidLoginCode` (RAIN_203, retype); a rejected or expired token is
+  renewed from your provider once, then `unauthorized` (RAIN_202); a tenant that cannot use
+  embedded wallets is `unauthorized` too; rate limits and backend outages are `providerError`.
 - The wallet-backend configuration is one-shot per app launch.
 - The Rain wallet provider cannot be registered alongside the Turnkey provider in one app
   (`RainSdk.build()` rejects the combination); they share one process-wide wallet backend.

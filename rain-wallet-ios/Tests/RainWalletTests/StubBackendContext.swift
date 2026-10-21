@@ -33,21 +33,24 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
     throw RainError.walletUnavailable()
   }
 
-  func sendOtp(contact: String, otpType: OtpType) async throws -> OtpChallenge {
-    OtpChallenge(otpId: "otp-id", encryptionTargetBundle: "bundle")
-  }
-
   var selectedStoredSessionKey: String?
 
-  func completeOtp(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String,
-    contact: String,
-    otpType: OtpType,
-    sessionKey: String,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws {}
+  // The device half of the code flow — canned, the RainWallet tests only check delegation.
+  func createOtpKeyPair() throws -> String { "stub-key" }
+  func encryptOtpCode(_ code: String, otpEncryptionTargetBundle: String, publicKey: String) throws -> String { "enc" }
+  func clientSignatureForLogin(verificationToken: String) throws -> (message: String, publicKey: String) {
+    ("login", "stub-key")
+  }
+  func clientSignatureForSignup(
+    verificationToken: String, email: String?, phoneNumber: String?
+  ) throws -> (message: String, publicKey: String) {
+    ("signup", "stub-key")
+  }
+  func signClientMessage(_ message: String, publicKey: String) async throws -> String { "sig" }
+  var storeSessionCalls: [String] = []
+  func storeTurnkeySession(jwt: String, sessionKey: String) async throws {
+    storeSessionCalls.append(sessionKey)
+  }
 
   func selectStoredSession(sessionKey: String) async throws {}
 
@@ -83,19 +86,8 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
     addPasskeyCalls.append(rpId)
   }
 
-  var verifyOtpTokenCalls: [String] = []
-  var stubbedVerificationToken = "stub-verification-token"
   var setUserEmailCalls: [(String, String?)] = []
   var setUserPhoneNumberCalls: [(String, String?)] = []
-
-  func verifyOtpToken(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String
-  ) async throws -> String {
-    verifyOtpTokenCalls.append(otpCode)
-    return stubbedVerificationToken
-  }
 
   func setUserEmail(_ email: String, verificationToken: String?) async throws {
     setUserEmailCalls.append((email, verificationToken))
@@ -123,5 +115,36 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
   ) async throws -> String {
     exportKeyCalls.append(ExportKeyCall(address: address, encoding: encoding))
     return stubbedExportedKey
+  }
+}
+
+/// rain-api's device endpoints, canned: every contact already has a wallet, every code is right.
+final class StubRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendable {
+  var tokens: [String] = []
+  var verificationToken = "stub-vt"
+
+  func initOtp(token: String) async throws -> RainApiOtpChallenge {
+    tokens.append(token)
+    return RainApiOtpChallenge(otpId: "otp", otpEncryptionTargetBundle: "bundle")
+  }
+  func verifyOtp(token: String, otpId: String, encryptedOtpBundle: String) async throws -> RainApiVerification {
+    tokens.append(token)
+    return RainApiVerification(verificationToken: verificationToken)
+  }
+  func signup(token: String, verificationToken: String, clientSignature: RainApiClientSignature) async throws -> RainApiSignup {
+    tokens.append(token)
+    return RainApiSignup(subOrganizationId: "sub")
+  }
+  func login(
+    token: String, verificationToken: String, clientSignature: RainApiClientSignature, subOrganizationId: String?
+  ) async throws -> RainApiLogin {
+    tokens.append(token)
+    return RainApiLogin(
+      sessionToken: "jwt", expiresAt: "", providerUserId: "u", walletAddress: "0xeth-address", solanaAddress: "sol-address"
+    )
+  }
+  func signupPasskey(token: String, attestation: RainApiPasskeyAttestation) async throws -> RainApiSignup {
+    tokens.append(token)
+    return RainApiSignup(subOrganizationId: "sub")
   }
 }

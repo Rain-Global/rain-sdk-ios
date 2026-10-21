@@ -1,12 +1,17 @@
 // RainWallet — the Rain-branded wallet provider.
 //
-// The wallet backend identity is embedded in the SDK — hosts configure nothing beyond optional
-// behavior (and their own passkey domain, if they use passkeys). Authentication runs inside the
-// SDK, and the resolved `RainClient` exposes the same wallet surface as every other provider.
+// The wallet backend identity is embedded in the SDK. Hosts configure the Rain environment, how
+// the app obtains wallet auth tokens from THEIR backend (minted with their Rain Api-Key — never
+// in the app), optional behavior, and their own passkey domain if they use passkeys.
+// Authentication runs inside the SDK, and the resolved `RainClient` exposes the same wallet
+// surface as every other provider.
 //
 //     import RainWallet   // surfaces RainCore too
 //
-//     let provider = RainProvider()
+//     let provider = RainProvider(RainWalletConfig(
+//         environment: .sandbox,
+//         authTokenProvider: { contact in try await myBackend.walletAuthToken(for: contact) }
+//     ))
 //
 //     await provider.awaitSessionRestore()
 //     if !provider.hasActiveSession() {
@@ -69,7 +74,46 @@ public enum RainWalletContact: Sendable, Equatable {
     case .phone(let value): .phone(value)
     }
   }
+
+  internal init(_ backing: TurnkeyLoginContact) {
+    switch backing {
+    case .email(let value): self = .email(value)
+    case .phone(let value): self = .phone(value)
+    }
+  }
 }
+
+// MARK: - Backend environment and wallet auth tokens
+
+/// Which Rain API the wallet authenticates against.
+public enum RainWalletEnvironment: Sendable, Equatable {
+  /// Rain sandbox (`api-dev.rain.xyz`): test users, testnets.
+  case sandbox
+  /// Rain production (`api.rain.xyz`).
+  case production
+  /// Another host, e.g. staging.
+  case custom(URL)
+
+  internal var baseURL: URL {
+    switch self {
+    case .sandbox: URL(string: "https://api-dev.rain.xyz")!
+    case .production: URL(string: "https://api.rain.xyz")!
+    case .custom(let url): url
+    }
+  }
+}
+
+/// Mints a wallet auth token for the SDK's code flows. **Your backend** calls Rain's
+/// `POST /v1/issuing/embedded-wallets/auth-tokens` with your Rain Api-Key and returns the
+/// token (`wat_…`) to the app; this closure is how the app hands it to the SDK. Never embed
+/// an Api-Key in the app.
+///
+/// The SDK calls it at the start of every code flow — `sendLoginCode` and
+/// `sendContactVerificationCode`, with the contact the token must be bound to — and once more
+/// if the token expires mid-flow. Passkey signup asks with `nil` (a contact-less token). Tokens
+/// live ten minutes and are consumed by login, so return a fresh one each time. Throw to abort
+/// the flow; a `RainError` passes through as-is, anything else surfaces as `providerError`.
+public typealias RainWalletAuthTokenProvider = @Sendable (RainWalletContact?) async throws -> String
 
 // MARK: - Key export
 
@@ -169,8 +213,17 @@ public struct RainWalletSessionPolicy: Sendable {
 // MARK: - Configuration
 
 /// Configuration for the Rain wallet provider. The wallet backend identity (Rain's organization
-/// and authentication configuration) is embedded in the SDK — hosts configure only behavior.
+/// and authentication configuration) is embedded in the SDK — hosts configure which Rain
+/// environment to use, how the app obtains wallet auth tokens from their backend, and behavior.
 public struct RainWalletConfig: Sendable {
+  /// Which Rain API the wallet authenticates against. Defaults to production: pointing a build
+  /// at the sandbox is an explicit choice.
+  public let environment: RainWalletEnvironment
+  /// How the app obtains wallet auth tokens from YOUR backend (see
+  /// ``RainWalletAuthTokenProvider``). `nil` leaves only passkey login usable:
+  /// ``RainProvider/sendLoginCode(to:)`` and ``RainProvider/sendContactVerificationCode(to:)``
+  /// throw `RainError.invalidConfig`.
+  public let authTokenProvider: RainWalletAuthTokenProvider?
   /// The passkey relying-party domain — a web domain YOUR app controls (e.g. "example.com").
   /// `nil` disables the passkey methods (they throw `RainError.invalidConfig`).
   ///
@@ -197,11 +250,15 @@ public struct RainWalletConfig: Sendable {
   public let onSessionExpired: (@Sendable () -> Void)?
 
   public init(
+    environment: RainWalletEnvironment = .production,
+    authTokenProvider: RainWalletAuthTokenProvider? = nil,
     passkeyDomain: String? = nil,
     sponsorGas: Bool = true,
     sessionPolicy: RainWalletSessionPolicy = RainWalletSessionPolicy(),
     onSessionExpired: (@Sendable () -> Void)? = nil
   ) {
+    self.environment = environment
+    self.authTokenProvider = authTokenProvider
     self.passkeyDomain = passkeyDomain
     self.sponsorGas = sponsorGas
     self.sessionPolicy = sessionPolicy
@@ -249,10 +306,21 @@ public struct RainProvider: ProviderDescriptor {
   }
 
   public init(_ config: RainWalletConfig = RainWalletConfig()) {
+    // The backend asks with its own contact type; translate to the host's on the way out.
+    var backingTokenProvider: TurnkeyManagedAuthBackend.TokenProvider?
+    if let provide = config.authTokenProvider {
+      backingTokenProvider = { (contact: TurnkeyLoginContact?) async throws -> String in
+        try await provide(contact.map { RainWalletContact($0) })
+      }
+    }
     self.backing = TurnkeyProvider(
       TurnkeyConfig(
         organizationId: RainWalletBackend.organizationId,
         authProxyConfigId: RainWalletBackend.authConfigId,
+        authBackend: TurnkeyManagedAuthBackend(
+          baseURL: config.environment.baseURL,
+          tokenProvider: backingTokenProvider
+        ),
         rpId: config.passkeyDomain,
         sessionPolicy: config.sessionPolicy.backingPolicy,
         sponsorGas: config.sponsorGas,

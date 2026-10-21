@@ -17,6 +17,24 @@ struct RainWalletTests {
     TurnkeyManagedConfigurator.sharedContext = { StubBackendContext() }
   }
 
+  private static let backend = TurnkeyManagedAuthBackend(
+    baseURL: URL(string: "https://api-dev.rain.xyz")!,
+    tokenProvider: { _ in "wat-stub" }
+  )
+
+  /// A backing provider over the stub context and a canned rain-api.
+  private static func backing(
+    _ stub: StubBackendContext, rpId: String? = nil, api: StubRainApiAuthClient = StubRainApiAuthClient()
+  ) -> TurnkeyProvider {
+    TurnkeyProvider(
+      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth", authBackend: backend, rpId: rpId),
+      context: stub,
+      managedAuth: TurnkeyManagedAuthController(
+        context: stub, configurationError: nil, rpId: rpId, api: api, tokenProvider: backend.tokenProvider
+      )
+    )
+  }
+
   // MARK: - State mapping
 
   @Test("session states map one-to-one onto the neutral enum")
@@ -75,11 +93,7 @@ struct RainWalletTests {
     // seams inject the stub directly instead.
     let stub = StubBackendContext()
     stub.wallets = [Self.dualAccountWallet()]
-    let provider = RainProvider(backing: TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth"),
-      context: stub,
-      managedAuth: TurnkeyManagedAuthController(context: stub, configurationError: nil)
-    ))
+    let provider = RainProvider(backing: Self.backing(stub))
 
     let phrase = try await provider.exportRecoveryPhrase()
     let ethKey = try await provider.exportPrivateKey(.ethereum)
@@ -149,11 +163,7 @@ struct RainWalletTests {
     stub.session = Self.stubSession()
     stub.authState = .authenticated
     stub.wallets = [Self.dualAccountWallet()]
-    let provider = RainProvider(backing: TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth"),
-      context: stub,
-      managedAuth: TurnkeyManagedAuthController(context: stub, configurationError: nil)
-    ))
+    let provider = RainProvider(backing: Self.backing(stub))
     #expect(provider.hasActiveSession())
 
     provider.close()
@@ -177,13 +187,8 @@ struct RainWalletTests {
     let stub = StubBackendContext()
     stub.session = Self.stubSession()
     stub.authState = .authenticated
-    let provider = RainProvider(backing: TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth", rpId: "passkeys.rain.xyz"),
-      context: stub,
-      managedAuth: TurnkeyManagedAuthController(
-        context: stub, configurationError: nil, rpId: "passkeys.rain.xyz"
-      )
-    ))
+    let api = StubRainApiAuthClient()
+    let provider = RainProvider(backing: Self.backing(stub, rpId: "passkeys.rain.xyz", api: api))
     let anchor = ASPresentationAnchor()
 
     try await provider.loginWithPasskey(anchor: anchor)
@@ -194,7 +199,9 @@ struct RainWalletTests {
     #expect(stub.loginWithPasskeyCallCount == 1)
     #expect(stub.addPasskeyCalls == ["passkeys.rain.xyz"])
     #expect(stub.setUserPhoneNumberCalls.map(\.0) == ["+15551234567"])
-    #expect(stub.setUserPhoneNumberCalls.first?.1 == stub.stubbedVerificationToken)
+    // The verification token rain-api returned is what marks the contact verified.
+    #expect(stub.setUserPhoneNumberCalls.first?.1 == api.verificationToken)
+    #expect(api.tokens == ["wat-stub", "wat-stub"], "init + verify ride on the host-minted token")
   }
 
   /// `Session` has no public memberwise init — round-trip through its Codable conformance.
