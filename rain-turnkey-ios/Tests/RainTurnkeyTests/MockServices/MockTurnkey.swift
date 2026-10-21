@@ -357,30 +357,77 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
     onRefreshSession?()
   }
 
-  // MARK: Managed auth seams
+  // MARK: Managed auth seams — the device half of the code flow
 
-  struct SendOtpCall: Equatable { let contact: String; let otpType: OtpType }
-  struct CompleteOtpCall: Equatable {
-    let otpId: String
-    let otpCode: String
-    let otpEncryptionTargetBundle: String
-    let contact: String
-    let otpType: OtpType
-    let sessionKey: String
-  }
   struct CreateWalletCall { let walletName: String; let accounts: [WalletAccountParams]; let mnemonicLength: Int }
 
-  var sendOtpCalls: [SendOtpCall] = []
-  var sendOtpError: Error?
-  var stubbedOtpChallenge = OtpChallenge(otpId: "otp-id", encryptionTargetBundle: "bundle")
+  /// Public keys handed out by `createOtpKeyPair`, in order ("otp-key-1", "otp-key-2", …).
+  var createdOtpKeys: [String] = []
+  var createOtpKeyPairError: Error?
 
-  var completeOtpCalls: [CompleteOtpCall] = []
-  /// The signup wallet accounts passed to each `completeOtp` call (parallel to
-  /// `completeOtpCalls`; `WalletAccountParams` is not Equatable so it can't live in the struct).
-  var completeOtpSignupAccounts: [[WalletAccountParams]] = []
-  var completeOtpError: Error?
-  /// Runs after a successful `completeOtp` — install the new session / authState here.
-  var onCompleteOtp: (() -> Void)?
+  struct EncryptOtpCall: Equatable { let code: String; let otpEncryptionTargetBundle: String; let publicKey: String }
+  var encryptOtpCalls: [EncryptOtpCall] = []
+  var encryptOtpError: Error?
+
+  struct SignupMessageCall: Equatable { let verificationToken: String; let email: String?; let phoneNumber: String? }
+  var loginMessageCalls: [String] = []
+  var signupMessageCalls: [SignupMessageCall] = []
+  /// The key the fake verification token is "bound to" — what `clientSignatureFor…` return.
+  var stubbedClientSignatureKey = "otp-key-1"
+
+  struct SignCall: Equatable { let message: String; let publicKey: String }
+  var signClientMessageCalls: [SignCall] = []
+  var signClientMessageError: Error?
+
+  struct StoreSessionCall: Equatable { let jwt: String; let sessionKey: String }
+  var storeSessionCalls: [StoreSessionCall] = []
+  var storeSessionError: Error?
+  /// Runs after a successful `storeTurnkeySession` — install the new session / authState here.
+  var onStoreSession: (() -> Void)?
+
+  func createOtpKeyPair() throws -> String {
+    if let createOtpKeyPairError { throw createOtpKeyPairError }
+    let key = "otp-key-\(createdOtpKeys.count + 1)"
+    createdOtpKeys.append(key)
+    return key
+  }
+
+  func encryptOtpCode(_ code: String, otpEncryptionTargetBundle: String, publicKey: String) throws -> String {
+    encryptOtpCalls.append(.init(code: code, otpEncryptionTargetBundle: otpEncryptionTargetBundle, publicKey: publicKey))
+    if let encryptOtpError { throw encryptOtpError }
+    return "enc(\(code))"
+  }
+
+  func clientSignatureForLogin(verificationToken: String) throws -> (message: String, publicKey: String) {
+    loginMessageCalls.append(verificationToken)
+    return ("login:\(verificationToken)", stubbedClientSignatureKey)
+  }
+
+  func clientSignatureForSignup(
+    verificationToken: String, email: String?, phoneNumber: String?
+  ) throws -> (message: String, publicKey: String) {
+    signupMessageCalls.append(.init(verificationToken: verificationToken, email: email, phoneNumber: phoneNumber))
+    return ("signup:\(verificationToken):\(email ?? phoneNumber ?? "")", stubbedClientSignatureKey)
+  }
+
+  func signClientMessage(_ message: String, publicKey: String) async throws -> String {
+    signClientMessageCalls.append(.init(message: message, publicKey: publicKey))
+    if let signClientMessageError { throw signClientMessageError }
+    return "sig(\(message))"
+  }
+
+  func storeTurnkeySession(jwt: String, sessionKey: String) async throws {
+    storeSessionCalls.append(.init(jwt: jwt, sessionKey: sessionKey))
+    if let storeSessionError { throw storeSessionError }
+    // Vendor behaviour: an occupied key refuses the store; the new session is auto-selected
+    // only when none was selected.
+    guard !storedSessionKeys.contains(sessionKey) else { throw TurnkeySwiftError.keyAlreadyExists }
+    storedSessionKeys.insert(sessionKey)
+    if selectedStoredSessionKey == nil {
+      selectedStoredSessionKey = sessionKey
+    }
+    onStoreSession?()
+  }
 
   struct AddAccountsCall { let walletId: String; let accounts: [WalletAccountParams] }
   var addAccountsCalls: [AddAccountsCall] = []
@@ -396,40 +443,9 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
   var selectStoredSessionCalls: [String] = []
   var selectStoredSessionError: Error?
 
-  func sendOtp(contact: String, otpType: OtpType) async throws -> OtpChallenge {
-    sendOtpCalls.append(SendOtpCall(contact: contact, otpType: otpType))
-    if let sendOtpError { throw sendOtpError }
-    return stubbedOtpChallenge
-  }
-
-  /// Keys with a stored session, mirroring the vendor's keychain registry. `completeOtp` and the
-  /// passkey flows insert; `clearStoredSession` removes.
+  /// Keys with a stored session, mirroring the vendor's keychain registry. `storeTurnkeySession`
+  /// and the passkey flows insert; `clearStoredSession` removes.
   var storedSessionKeys: Set<String> = []
-
-  func completeOtp(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String,
-    contact: String,
-    otpType: OtpType,
-    sessionKey: String,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws {
-    completeOtpCalls.append(CompleteOtpCall(
-      otpId: otpId, otpCode: otpCode, otpEncryptionTargetBundle: otpEncryptionTargetBundle,
-      contact: contact, otpType: otpType, sessionKey: sessionKey
-    ))
-    completeOtpSignupAccounts.append(signupWalletAccounts)
-    if let completeOtpError { throw completeOtpError }
-    // Vendor behaviour: an occupied key refuses the store; the new session is auto-selected
-    // only when none was selected.
-    guard !storedSessionKeys.contains(sessionKey) else { throw TurnkeySwiftError.keyAlreadyExists }
-    storedSessionKeys.insert(sessionKey)
-    if selectedStoredSessionKey == nil {
-      selectedStoredSessionKey = sessionKey
-    }
-    onCompleteOtp?()
-  }
 
   func selectStoredSession(sessionKey: String) async throws {
     selectStoredSessionCalls.append(sessionKey)
@@ -506,31 +522,10 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
 
   // MARK: Contact verification seams
 
-  struct VerifyOtpTokenCall: Equatable {
-    let otpId: String
-    let otpCode: String
-    let otpEncryptionTargetBundle: String
-  }
-  var verifyOtpTokenCalls: [VerifyOtpTokenCall] = []
-  var verifyOtpTokenError: Error?
-  var stubbedVerificationToken = "verification-token"
-
   struct SetContactCall: Equatable { let contact: String; let verificationToken: String? }
   var setUserEmailCalls: [SetContactCall] = []
   var setUserPhoneNumberCalls: [SetContactCall] = []
   var setUserContactError: Error?
-
-  func verifyOtpToken(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String
-  ) async throws -> String {
-    verifyOtpTokenCalls.append(VerifyOtpTokenCall(
-      otpId: otpId, otpCode: otpCode, otpEncryptionTargetBundle: otpEncryptionTargetBundle
-    ))
-    if let verifyOtpTokenError { throw verifyOtpTokenError }
-    return stubbedVerificationToken
-  }
 
   func setUserEmail(_ email: String, verificationToken: String?) async throws {
     setUserEmailCalls.append(SetContactCall(contact: email, verificationToken: verificationToken))

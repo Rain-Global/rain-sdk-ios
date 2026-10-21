@@ -5,6 +5,7 @@ import Foundation
 import TurnkeyCrypto
 import TurnkeyHttp
 import TurnkeyPasskeys
+import TurnkeyStamper
 import TurnkeySwift
 import TurnkeyTypes
 @_spi(RainAdapter) import RainCore
@@ -44,13 +45,6 @@ internal protocol TurnkeyClientProtocol {
 
 extension TurnkeyClient: TurnkeyClientProtocol {}
 
-/// An in-flight OTP: the id and TEE-signed encryption bundle from `sendOtp`, needed to complete
-/// the flow. Module-owned so test doubles can construct it.
-internal struct OtpChallenge: Sendable, Equatable {
-  let otpId: String
-  let encryptionTargetBundle: String
-}
-
 internal protocol TurnkeyContextProtocol: AnyObject {
   var wallets: [Wallet] { get }
   var session: Session? { get }
@@ -73,29 +67,44 @@ internal protocol TurnkeyContextProtocol: AnyObject {
     hashFunction: TurnkeySwift.HashFunction
   ) async throws -> SignRawPayloadResult
 
-  // MARK: Managed auth (email OTP via the auth proxy)
+  // MARK: Managed auth — the device half of the one-time-code flow
+  //
+  // rain-api replaced the vendor's Auth Proxy for code send/verify, signup and login. What the
+  // proxy flow did on-device inside `verifyOtp` / `loginWithOtp` the controller now does through
+  // these seams, so the crypto stays mockable: a fresh key pair per attempt, the code encrypted
+  // to it, the verification token (which carries that public key) turned into a signed client
+  // message, and the session JWT rain-api returns stored under our per-attempt key.
 
-  /// Starts an OTP flow. Distinctly named so it cannot collide with the vendor's `initOtp`, and
-  /// returns a module-owned value so mocks need not construct the vendor's result type.
-  func sendOtp(contact: String, otpType: OtpType) async throws -> OtpChallenge
+  /// Generates a fresh P-256 key pair in secure storage and returns its hex public key. One per
+  /// login attempt.
+  func createOtpKeyPair() throws -> String
+
+  /// Encrypts the typed code to the backend's target bundle, bound to `publicKey`.
+  func encryptOtpCode(
+    _ code: String,
+    otpEncryptionTargetBundle: String,
+    publicKey: String
+  ) throws -> String
+
+  /// The login message to sign, and the public key the verification token is bound to.
+  func clientSignatureForLogin(verificationToken: String) throws -> (message: String, publicKey: String)
+
+  /// The signup message to sign (contact only — rain-api provisions the wallet), and the key.
+  func clientSignatureForSignup(
+    verificationToken: String,
+    email: String?,
+    phoneNumber: String?
+  ) throws -> (message: String, publicKey: String)
+
+  /// Signs `message` with the stored private key behind `publicKey`, raw P-256 signature hex.
+  func signClientMessage(_ message: String, publicKey: String) async throws -> String
+
+  /// Stores a session JWT under `sessionKey` (the vendor's keychain registry; refuses an
+  /// occupied key, auto-selects only when nothing was selected).
+  func storeTurnkeySession(jwt: String, sessionKey: String) async throws
 
   /// The key the currently selected stored session lives under, if any.
   var selectedStoredSessionKey: String? { get }
-
-  /// Completes the OTP flow (signup-or-login), storing the resulting session under `sessionKey`.
-  /// On the signup path, `signupWalletAccounts` become the accounts of a single custom wallet
-  /// created atomically with the sub-organization (one seed for every chain family); ignored on
-  /// the login path. Distinctly named and fixed-arity so it cannot collide with the vendor's
-  /// defaulted `completeOtp(...)`.
-  func completeOtp(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String,
-    contact: String,
-    otpType: OtpType,
-    sessionKey: String,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws
 
   /// Derives additional accounts from an EXISTING wallet's seed (no new wallet, no new seed)
   /// and refreshes the wallet list.
@@ -139,14 +148,6 @@ internal protocol TurnkeyContextProtocol: AnyObject {
   func addPasskeyAuthenticator(anchor: ASPresentationAnchor, rpId: String) async throws
 
   // MARK: Contact verification (RainWallet)
-
-  /// Verifies an OTP code WITHOUT logging in and returns the verification token proving the
-  /// contact. Distinctly named so it cannot collide with the vendor's defaulted `verifyOtp(...)`.
-  func verifyOtpToken(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String
-  ) async throws -> String
 
   /// Sets the authenticated user's email; the verification token marks it VERIFIED, which is
   /// what lets the contact become a login method.
@@ -199,47 +200,53 @@ extension TurnkeyContext: TurnkeyContextProtocol {
     }
   }
 
-  internal func sendOtp(contact: String, otpType: OtpType) async throws -> OtpChallenge {
-    let result = try await initOtp(contact: contact, otpType: otpType)
-    return OtpChallenge(otpId: result.otpId, encryptionTargetBundle: result.otpEncryptionTargetBundle)
-  }
-
   internal var selectedStoredSessionKey: String? {
     selectedSessionKey
   }
 
-  internal func completeOtp(
-    otpId: String,
-    otpCode: String,
+  internal func createOtpKeyPair() throws -> String {
+    try createKeyPair()
+  }
+
+  internal func encryptOtpCode(
+    _ code: String,
     otpEncryptionTargetBundle: String,
-    contact: String,
-    otpType: OtpType,
-    sessionKey: String,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws {
-    // The custom wallet is created atomically inside the signup call, closing the window where
-    // the sub-organization exists but wallet provisioning failed. Login ignores these params.
-    // CreateSubOrgParams has no public initializer at swift-sdk 4.0.0 — its Decodable witness is
-    // the only way to construct one from outside the vendor module.
-    var subOrgParams = try JSONDecoder().decode(CreateSubOrgParams.self, from: Data("{}".utf8))
-    subOrgParams.customWallet = v1WalletParams(
-      accounts: signupWalletAccounts,
-      mnemonicLength: 12,
-      walletName: "Wallet"
-    )
-    _ = try await completeOtp(
-      otpId: otpId,
-      otpCode: otpCode,
+    publicKey: String
+  ) throws -> String {
+    try TurnkeyCrypto.encryptOtpCodeToBundle(
+      otpCode: code,
       otpEncryptionTargetBundle: otpEncryptionTargetBundle,
-      contact: contact,
-      otpType: otpType,
-      createSubOrgParams: subOrgParams,
-      // Server-side: kills every other login session the user has, on every device — a second
-      // phone logging in logs the first out (documented on the managed TurnkeyConfig init;
-      // Android passes the same value).
-      invalidateExisting: true,
-      sessionKey: sessionKey
+      publicKey: publicKey
     )
+  }
+
+  internal func clientSignatureForLogin(verificationToken: String) throws -> (message: String, publicKey: String) {
+    let (message, publicKey) = try ClientSignature.forLogin(verificationToken: verificationToken)
+    return (message, publicKey)
+  }
+
+  internal func clientSignatureForSignup(
+    verificationToken: String,
+    email: String?,
+    phoneNumber: String?
+  ) throws -> (message: String, publicKey: String) {
+    let (message, publicKey) = try ClientSignature.forSignup(
+      verificationToken: verificationToken,
+      email: email,
+      phoneNumber: phoneNumber
+    )
+    return (message, publicKey)
+  }
+
+  internal func signClientMessage(_ message: String, publicKey: String) async throws -> String {
+    // The stamper resolves the private key from secure storage by its public key — the one
+    // `createOtpKeyPair` made for this attempt and the verification token is bound to.
+    let stamper = try Stamper(apiPublicKey: publicKey)
+    return try await stamper.sign(payload: message, format: .raw)
+  }
+
+  internal func storeTurnkeySession(jwt: String, sessionKey: String) async throws {
+    try await storeSession(jwt: jwt, sessionKey: sessionKey)
   }
 
   internal func addAccountsToTurnkeyWallet(
@@ -323,18 +330,6 @@ extension TurnkeyContext: TurnkeyContextProtocol {
       )],
       userId: session.userId
     ))
-  }
-
-  internal func verifyOtpToken(
-    otpId: String,
-    otpCode: String,
-    otpEncryptionTargetBundle: String
-  ) async throws -> String {
-    try await verifyOtp(
-      otpId: otpId,
-      otpCode: otpCode,
-      otpEncryptionTargetBundle: otpEncryptionTargetBundle
-    ).verificationToken
   }
 
   internal func setUserEmail(_ email: String, verificationToken: String?) async throws {
