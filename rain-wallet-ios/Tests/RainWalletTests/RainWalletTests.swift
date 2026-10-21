@@ -84,6 +84,38 @@ struct RainWalletTests {
     #expect(RainProvider(RainWalletConfig(sponsorGas: false)).capabilities == [.export, .multiChain])
   }
 
+  // MARK: - Configuration wiring
+
+  @Test("the environment maps to Rain's hosts, production by default")
+  func testEnvironmentWiring() {
+    #expect(RainProvider(RainWalletConfig()).backing.managedAuthBackend?.baseURL.absoluteString == "https://api.rain.xyz")
+    #expect(RainProvider(RainWalletConfig(environment: .sandbox)).backing.managedAuthBackend?.baseURL.absoluteString == "https://api-dev.rain.xyz")
+    let staging = URL(string: "https://staging.example/api")!
+    #expect(RainProvider(RainWalletConfig(environment: .custom(staging))).backing.managedAuthBackend?.baseURL == staging)
+  }
+
+  @Test("the token provider is handed to the backend with the contact translated, nil stays nil")
+  func testTokenProviderWiring() async throws {
+    let asked = Asked()
+    let provider = RainProvider(RainWalletConfig(authTokenProvider: { contact in
+      await asked.record(contact)
+      return "wat-from-host"
+    }))
+    let backendProvider = try #require(provider.backing.managedAuthBackend?.tokenProvider)
+
+    #expect(try await backendProvider(.email("user@example.com")) == "wat-from-host")
+    #expect(try await backendProvider(.phone("+15551234567")) == "wat-from-host")
+    #expect(try await backendProvider(nil) == "wat-from-host")
+    #expect(await asked.contacts == [.email("user@example.com"), .phone("+15551234567"), nil])
+
+    #expect(RainProvider(RainWalletConfig()).backing.managedAuthBackend?.tokenProvider == nil)
+  }
+
+  private actor Asked {
+    var contacts: [RainWalletContact?] = []
+    func record(_ contact: RainWalletContact?) { contacts.append(contact) }
+  }
+
   // MARK: - Key export
 
   @Test("export methods delegate to the backend with the right account and encoding")

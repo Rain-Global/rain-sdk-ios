@@ -190,6 +190,14 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
 
   public var id: ProviderId { .turnkey }
 
+  /// The rain-api backend a managed provider was built with; `nil` in BYO mode. Lets RainWallet
+  /// (and its tests) see what its configuration translated to.
+  @_spi(RainWallet)
+  public var managedAuthBackend: TurnkeyManagedAuthBackend? {
+    if case .managed(_, _, _, let authBackend) = config.mode { return authBackend }
+    return nil
+  }
+
   /// Turnkey holds EVM + Solana accounts (`.multiChain`) and can export keys (`.export`); with
   /// `TurnkeyConfig.sponsorGas` on it also advertises `.gasSponsorship`. Signing itself is NOT
   /// biometric-gated — the vendor's enclave key uses a `.none` auth policy — so `.biometricGate`

@@ -270,7 +270,77 @@ struct TurnkeyManagedAuthTests {
     #expect(turnkey.addAccountsCalls.count == 1)
     let call = try #require(turnkey.addAccountsCalls.first)
     #expect(call.walletId == "wallet-id")
+    #expect(call.accounts.count == 1)
     #expect(call.accounts.first?.addressFormat == .address_format_solana)
+    #expect(call.accounts.first?.curve == .curve_ed25519)
+  }
+
+  @Test("a signup that fails ends the attempt: nothing stored, the next confirm needs a new code")
+  func testSignupFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(session: nil)
+    let h = Harness(turnkey: turnkey)
+    h.api.signupError = RainApiAuthError(kind: .conflict, statusCode: 409, message: "Signup in progress")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    let error = await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(error?.code == "RAIN_501")
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .login, .signup])
+    #expect(turnkey.storeSessionCalls.isEmpty)
+    #expect(h.controller.currentAuthState() == .unauthenticated)
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+  }
+
+  @Test("a login that fails after verification ends the attempt without touching a live session")
+  func testLoginFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
+    let h = Harness(turnkey: turnkey)
+    h.api.loginError = RainApiAuthError(kind: .serverError, statusCode: 503, message: "Turnkey is not configured")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(turnkey.storeSessionCalls.isEmpty)
+    #expect(turnkey.clearStoredSessionCalls.isEmpty)
+    #expect(h.controller.hasActiveSession(), "the previous session survives a failed login")
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+  }
+
+  @Test("a signing failure on the device ends the attempt before any login call")
+  func testSigningFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(session: nil)
+    struct NoSuchKey: Error {}
+    turnkey.signClientMessageError = NoSuchKey()
+    let h = Harness(turnkey: turnkey)
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp], "nothing reached /login")
+    #expect(turnkey.storeSessionCalls.isEmpty)
+  }
+
+  @Test("a session the vendor refuses to store ends the attempt with nothing selected or cleared")
+  func testStoreSessionFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.storeSessionError = TurnkeySwiftError.keyAlreadyExists
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-1"
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(turnkey.selectStoredSessionCalls.isEmpty)
+    #expect(turnkey.clearStoredSessionCalls.isEmpty)
+    #expect(h.controller.currentAuthState() == .unauthenticated)
   }
 
   @Test("confirmLoginCode with no wallet at all creates one wallet with both accounts")

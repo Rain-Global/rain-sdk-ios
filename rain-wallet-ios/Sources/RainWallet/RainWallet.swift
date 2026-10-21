@@ -287,7 +287,7 @@ internal enum RainWalletBackend {
 /// provider with *different* ids makes every auth call on it throw `invalidConfig` until the app
 /// relaunches. The Rain wallet provider cannot be registered alongside the Turnkey provider.
 public struct RainProvider: ProviderDescriptor {
-  private let backing: TurnkeyProvider
+  internal let backing: TurnkeyProvider
   /// Flipped by ``close()``. A reference so every copy of this value sees the same lifecycle.
   private let lifecycle = Lifecycle()
 

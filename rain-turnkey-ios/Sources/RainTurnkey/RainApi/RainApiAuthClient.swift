@@ -12,13 +12,6 @@ import Foundation
 // Pure transport + decoding + error classification. No flow logic: the managed-auth controller
 // decides what a 404 on login means (go sign up), how a wrong code is retried, and so on.
 
-/// The two hosts the SDK knows, plus an escape hatch for staging. Only dev has Turnkey
-/// configured today; elsewhere the device endpoints answer 503.
-internal enum RainApiHost {
-  static let sandbox = URL(string: "https://api-dev.rain.xyz")!
-  static let production = URL(string: "https://api.rain.xyz")!
-}
-
 // MARK: - Wire types
 
 internal struct RainApiOtpChallenge: Equatable, Decodable, Sendable {
