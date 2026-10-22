@@ -22,9 +22,15 @@ public struct TurnkeyConfig: @unchecked Sendable {
   internal enum Mode: @unchecked Sendable {
     /// Host-authenticated context; the SDK exposes no auth surface.
     case byoContext(TurnkeyContext)
-    /// SDK-managed auth against the Turnkey organization + auth-proxy configuration.
-    /// `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
-    case managed(organizationId: String, authProxyConfigId: String, rpId: String?)
+    /// SDK-managed auth: one-time codes and signup/login go through rain-api (`authBackend`);
+    /// the Turnkey organization + auth-proxy configuration still back the vendor's passkey
+    /// signup. `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
+    case managed(
+      organizationId: String,
+      authProxyConfigId: String,
+      rpId: String?,
+      authBackend: TurnkeyManagedAuthBackend
+    )
   }
 
   internal let mode: Mode
@@ -79,15 +85,16 @@ public struct TurnkeyConfig: @unchecked Sendable {
   /// managed provider with *different* ids leaves the first configuration in place and makes
   /// every auth call on the new provider throw `invalidConfig`.
   ///
-  /// Single active login per user: `confirmLoginCode` completes the OTP with Turnkey's
-  /// `invalidateExisting: true`, which server-side kills every other login session the user has —
-  /// including on other devices. Logging in on a second phone therefore logs the first one out
-  /// (its next call fails, firing `onSessionExpired` there). A cross-platform contract with the
-  /// Android SDK, which passes the same value.
+  /// One-time-code login and signup run against rain-api (`authBackend`), riding on a wallet
+  /// auth token the host's backend mints; `authBackend.tokenProvider == nil` leaves only
+  /// passkey login usable (the code flows throw `invalidConfig`). Logging in does NOT revoke
+  /// the user's other sessions any more (rain-api's `/login` has no `invalidateExisting`) —
+  /// a second device logging in leaves the first one live.
   @_spi(RainWallet)
   public init(
     organizationId: String,
     authProxyConfigId: String,
+    authBackend: TurnkeyManagedAuthBackend,
     rpId: String? = nil,
     walletAddress: String? = nil,
     sessionPolicy: TurnkeySessionPolicy = TurnkeySessionPolicy(),
@@ -97,7 +104,8 @@ public struct TurnkeyConfig: @unchecked Sendable {
     self.mode = .managed(
       organizationId: organizationId,
       authProxyConfigId: authProxyConfigId,
-      rpId: rpId
+      rpId: rpId,
+      authBackend: authBackend
     )
     self.walletAddress = walletAddress
     self.sponsorGas = sponsorGas
@@ -143,7 +151,7 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
     case .byoContext(let turnkey):
       context = turnkey
       managedAuth = nil
-    case .managed(let organizationId, let authProxyConfigId, let rpId):
+    case .managed(let organizationId, let authProxyConfigId, let rpId, let authBackend):
       // One-shot per process; a mismatch is remembered and thrown from every auth call.
       let configurationError = TurnkeyManagedConfigurator.configure(
         organizationId: organizationId,
@@ -155,7 +163,9 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
       managedAuth = TurnkeyManagedAuthController(
         context: shared,
         configurationError: configurationError,
-        rpId: rpId
+        rpId: rpId,
+        api: RainApiAuthClient(baseURL: authBackend.baseURL),
+        tokenProvider: authBackend.tokenProvider
       )
     }
 
@@ -179,6 +189,14 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
   }
 
   public var id: ProviderId { .turnkey }
+
+  /// The rain-api backend a managed provider was built with; `nil` in BYO mode. Lets RainWallet
+  /// (and its tests) see what its configuration translated to.
+  @_spi(RainWallet)
+  public var managedAuthBackend: TurnkeyManagedAuthBackend? {
+    if case .managed(_, _, _, let authBackend) = config.mode { return authBackend }
+    return nil
+  }
 
   /// Turnkey holds EVM + Solana accounts (`.multiChain`) and can export keys (`.export`); with
   /// `TurnkeyConfig.sponsorGas` on it also advertises `.gasSponsorship`. Signing itself is NOT

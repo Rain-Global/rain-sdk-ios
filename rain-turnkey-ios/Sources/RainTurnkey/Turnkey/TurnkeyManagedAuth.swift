@@ -89,6 +89,30 @@ public enum TurnkeyLoginContact: Sendable, Equatable {
   }
 }
 
+// MARK: - Auth backend (rain-api)
+
+/// Where managed auth talks to Rain's backend, and how it obtains the wallet auth token that
+/// every device call rides on. Not public API — `@_spi(RainWallet)`, surfaced through
+/// `RainWalletConfig(environment:authTokenProvider:)`.
+///
+/// The token (`wat_…`) is minted by the PARTNER'S BACKEND with its Rain Api-Key: ten-minute TTL,
+/// bound to one contact (or to none, for passkey signup), consumed by login. The SDK asks
+/// `tokenProvider` for one at the start of each code flow — login, or attaching a contact — and
+/// once more if the backend reports the token expired mid-flow. `nil` means the host has not
+/// wired a backend: the code flows throw `invalidConfig`, passkey login still works.
+@_spi(RainWallet)
+public struct TurnkeyManagedAuthBackend: @unchecked Sendable {
+  public typealias TokenProvider = @Sendable (TurnkeyLoginContact?) async throws -> String
+
+  public let baseURL: URL
+  public let tokenProvider: TokenProvider?
+
+  public init(baseURL: URL, tokenProvider: TokenProvider?) {
+    self.baseURL = baseURL
+    self.tokenProvider = tokenProvider
+  }
+}
+
 // MARK: - Key export
 
 /// Chain-family selector for a single-key export.
@@ -160,12 +184,24 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   private let context: TurnkeyContextProtocol
   /// Set when the process was already configured with different ids; every call fails with it.
   private let configurationError: RainError?
+  /// rain-api's device endpoints.
+  private let api: any RainApiAuthClientProtocol
+  /// Mints the wallet auth token each code flow rides on; `nil` = no backend wired by the host.
+  private let tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?
 
-  /// In-flight OTP handed back by `sendLoginCode`, consumed by `confirmLoginCode`.
-  private var pendingOtp: (challenge: OtpChallenge, contact: TurnkeyLoginContact)?
-  /// In-flight OTP for contact verification (attach a login contact to the current account) —
+  /// One code flow in flight: the token it rides on, the challenge rain-api issued, and the
+  /// normalized contact the token is bound to.
+  internal struct PendingCode {
+    var token: String
+    let challenge: RainApiOtpChallenge
+    let contact: TurnkeyLoginContact
+  }
+
+  /// In-flight code handed back by `sendLoginCode`, consumed by `confirmLoginCode`.
+  private var pendingOtp: PendingCode?
+  /// In-flight code for contact verification (attach a login contact to the current account) —
   /// deliberately separate from `pendingOtp` so a login flow can't consume a verification code.
-  private var pendingContactVerification: (challenge: OtpChallenge, contact: TurnkeyLoginContact)?
+  private var pendingContactVerification: PendingCode?
   private let pendingOtpLock = NSLock()
 
   /// The passkey relying-party domain from the managed configuration; `nil` means passkeys are
@@ -199,11 +235,15 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   internal init(
     context: TurnkeyContextProtocol,
     configurationError: RainError?,
-    rpId: String? = nil
+    rpId: String? = nil,
+    api: any RainApiAuthClientProtocol,
+    tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?
   ) {
     self.context = context
     self.configurationError = configurationError
     self.rpId = rpId
+    self.api = api
+    self.tokenProvider = tokenProvider
   }
 
   // MARK: State
@@ -245,52 +285,110 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
 
   // MARK: One-time-code login (email or SMS)
 
+  /// Asks the host's backend for a wallet auth token bound to `contact` (nil = contact-less,
+  /// passkey signup only). `invalidConfig` when the host wired no backend.
+  private func mintToken(for contact: TurnkeyLoginContact?) async throws -> String {
+    guard let tokenProvider else {
+      throw RainError.invalidConfig(details:
+        "No wallet auth token provider is configured — pass `authTokenProvider` in the Rain "
+        + "wallet configuration (your backend mints it with your Rain Api-Key)")
+    }
+    do {
+      return try await tokenProvider(contact)
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch let error as RainError {
+      throw error
+    } catch {
+      throw RainError.providerError(underlying: error)
+    }
+  }
+
+  /// Runs one rain-api call that rides on `pending.token`; if the backend reports the token
+  /// expired or revoked, mints one more from the host and retries ONCE. A 401 "Invalid tenant"
+  /// is classified as `.forbidden`, not `.tokenRejected`, so it never reaches here.
+  private func withTokenRetry<T>(
+    _ pending: inout PendingCode,
+    _ call: (String) async throws -> T
+  ) async throws -> T {
+    do {
+      return try await call(pending.token)
+    } catch let error as RainApiAuthError where error.kind == .tokenRejected {
+      pending.token = try await mintToken(for: pending.contact)
+      return try await call(pending.token)
+    }
+  }
+
   internal func sendLoginCode(to contact: TurnkeyLoginContact) async throws {
     try throwIfMisconfigured()
-    // The normalized string is the account identity — it is what gets sent, confirmed, and stored.
+    // The normalized string is the account identity — it is what the token is bound to, what
+    // signup records, and what the next login must normalize to again.
     let contact = try contact.normalized()
+    let token = try await mintToken(for: contact)
     do {
-      let challenge = try await context.sendOtp(
-        contact: contact.contact,
-        otpType: contact.otpType
-      )
+      let challenge = try await api.initOtp(token: token)
       pendingOtpLock.withLock {
-        pendingOtp = (challenge, contact)
+        pendingOtp = PendingCode(token: token, challenge: challenge, contact: contact)
       }
     } catch {
       throw RainError.from(underlying: error)
     }
   }
 
-  /// Confirms the code from `sendLoginCode`. Handles first-time signup and returning login
-  /// transparently, then ensures the account has Ethereum and Solana accounts on a single
-  /// wallet seed, so the user is immediately usable on every chain family Rain serves with one
-  /// phrase to back up.
+  /// Confirms the code from `sendLoginCode`. The device does what the vendor's proxy flow did:
+  /// a fresh key pair, the code encrypted to it, the verification token exchanged for a session
+  /// with a client signature. Login-or-signup is decided by rain-api's answer — a 404 means no
+  /// wallet for this contact in this tenant, so the account is signed up (rain-api provisions
+  /// one seed with the Ethereum and Solana accounts) and logged in on the same token. Then the
+  /// account's accounts are re-checked (backfill for legacy seeds).
   internal func confirmLoginCode(_ code: String) async throws {
     try throwIfMisconfigured()
-    guard let pending = pendingOtpLock.withLock({ pendingOtp }) else {
+    guard var pending = pendingOtpLock.withLock({ pendingOtp }) else {
       throw RainError.invalidConfig(details: "No login code was requested; call sendLoginCode first")
     }
-    // Log in under a fresh per-attempt session key: the vendor throws keyAlreadyExists only for
-    // a same-key collision, so an already-active session survives a mistyped code (verifyOtp
-    // consumes the code, so a premature logout could not be undone by retrying). Mirrors the
-    // Android SDK's behaviour.
+
+    let verificationToken: String
+    do {
+      // Fresh per attempt: the verification token is bound to this key, and a retyped code
+      // must not reuse a key a failed attempt already bound.
+      let publicKey = try context.createOtpKeyPair()
+      let encrypted = try context.encryptOtpCode(
+        code,
+        otpEncryptionTargetBundle: pending.challenge.otpEncryptionTargetBundle,
+        publicKey: publicKey
+      )
+      let otpId = pending.challenge.otpId
+      verificationToken = try await withTokenRetry(&pending) { token in
+        try await api.verifyOtp(token: token, otpId: otpId, encryptedOtpBundle: encrypted)
+      }.verificationToken
+    } catch let error as RainApiAuthError where error.kind == .invalidCode {
+      // The challenge survives a mistyped code: the user retypes, no new code is sent.
+      pendingOtpLock.withLock { pendingOtp = pending }
+      throw RainError.invalidLoginCode
+    } catch {
+      // Verification failed for good (or the token could not be renewed): the attempt is over,
+      // the user requests a new code. Nothing was stored, a live session stays live.
+      pendingOtpLock.withLock { pendingOtp = nil }
+      throw RainError.from(underlying: error)
+    }
+
+    let login: RainApiLogin
+    do {
+      login = try await loginOrSignUp(&pending, verificationToken: verificationToken)
+    } catch {
+      pendingOtpLock.withLock { pendingOtp = nil }
+      throw RainError.from(underlying: error)
+    }
+
+    // Store under a fresh per-attempt session key: the vendor refuses only a same-key
+    // collision, so an already-active session survives until the new one is selected.
+    // Mirrors the Android SDK's behaviour.
     let attemptKey = "rain-turnkey-\(UUID().uuidString)"
     let previousKey = context.selectedStoredSessionKey
     do {
-      try await context.completeOtp(
-        otpId: pending.challenge.otpId,
-        otpCode: code,
-        otpEncryptionTargetBundle: pending.challenge.encryptionTargetBundle,
-        contact: pending.contact.contact,
-        otpType: pending.contact.otpType,
-        sessionKey: attemptKey,
-        // Signup creates ONE wallet with both accounts atomically; ignored on login.
-        signupWalletAccounts: [Self.ethereumAccount, Self.solanaAccount]
-      )
+      try await context.storeTurnkeySession(jwt: login.sessionToken, sessionKey: attemptKey)
     } catch {
-      // Nothing was stored or cleared — a live session stays live and the user can request a
-      // new code.
+      pendingOtpLock.withLock { pendingOtp = nil }
       throw RainError.from(underlying: error)
     }
     do {
@@ -308,11 +406,58 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     if let previousKey, previousKey != attemptKey {
       context.clearStoredSession(sessionKey: previousKey)
     }
+    pendingOtpLock.withLock { pendingOtp = nil }
     do {
       try await ensureWallets()
-      pendingOtpLock.withLock { pendingOtp = nil }
     } catch {
       throw RainError.from(underlying: error)
+    }
+  }
+
+  /// `/login`, and on 404 `/signup` then `/login` again — same wallet auth token (signup does
+  /// not consume it), same verification token. Each call gets its own signature over its own
+  /// message; both messages name the key the verification token is bound to.
+  private func loginOrSignUp(
+    _ pending: inout PendingCode,
+    verificationToken: String
+  ) async throws -> RainApiLogin {
+    let (loginMessage, publicKey) = try context.clientSignatureForLogin(verificationToken: verificationToken)
+    let loginSignature = RainApiClientSignature(
+      publicKey: publicKey,
+      message: loginMessage,
+      signature: try await context.signClientMessage(loginMessage, publicKey: publicKey)
+    )
+    do {
+      return try await withTokenRetry(&pending) { token in
+        try await api.login(
+          token: token, verificationToken: verificationToken,
+          clientSignature: loginSignature, subOrganizationId: nil
+        )
+      }
+    } catch let error as RainApiAuthError where error.kind == .noWallet {
+      // First login for this contact in this tenant.
+    }
+
+    let (email, phone): (String?, String?) = switch pending.contact {
+    case .email(let value): (value, nil)
+    case .phone(let value): (nil, value)
+    }
+    let (signupMessage, signupKey) = try context.clientSignatureForSignup(
+      verificationToken: verificationToken, email: email, phoneNumber: phone
+    )
+    let signupSignature = RainApiClientSignature(
+      publicKey: signupKey,
+      message: signupMessage,
+      signature: try await context.signClientMessage(signupMessage, publicKey: signupKey)
+    )
+    let signup = try await withTokenRetry(&pending) { token in
+      try await api.signup(token: token, verificationToken: verificationToken, clientSignature: signupSignature)
+    }
+    return try await withTokenRetry(&pending) { token in
+      try await api.login(
+        token: token, verificationToken: verificationToken,
+        clientSignature: loginSignature, subOrganizationId: signup.subOrganizationId
+      )
     }
   }
 
@@ -438,20 +583,19 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   // MARK: Contact verification (attach a login contact to the current account)
 
   /// Sends a verification code to a contact the user wants to ATTACH to the current account
-  /// (active session required). Distinct from `sendLoginCode`, which starts a login.
+  /// (active session required). Distinct from `sendLoginCode`, which starts a login. Rides on
+  /// a wallet auth token minted for the NEW contact.
   internal func sendContactVerificationCode(to contact: TurnkeyLoginContact) async throws {
     try throwIfMisconfigured()
     guard hasActiveSession() else { throw RainError.tokenExpired }
     // Normalized before it is verified and attached — the stored contact must be the exact
     // string a later login normalizes to.
     let contact = try contact.normalized()
+    let token = try await mintToken(for: contact)
     do {
-      let challenge = try await context.sendOtp(
-        contact: contact.contact,
-        otpType: contact.otpType
-      )
+      let challenge = try await api.initOtp(token: token)
       pendingOtpLock.withLock {
-        pendingContactVerification = (challenge, contact)
+        pendingContactVerification = PendingCode(token: token, challenge: challenge, contact: contact)
       }
     } catch {
       throw RainError.from(underlying: error)
@@ -459,27 +603,36 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   }
 
   /// Confirms the code from `sendContactVerificationCode` and attaches the contact — VERIFIED,
-  /// so it becomes a login method for this account. A wrong code throws `invalidLoginCode` and
-  /// keeps the challenge, so the user can retype it.
+  /// so it becomes a login method for this account. The verification token rain-api returns is
+  /// the same Turnkey token the vendor's `updateUserEmail` / `updateUserPhoneNumber` accept. A
+  /// wrong code throws `invalidLoginCode` and keeps the challenge, so the user can retype it.
   internal func confirmContactVerification(_ code: String) async throws {
     try throwIfMisconfigured()
-    guard let pending = pendingOtpLock.withLock({ pendingContactVerification }) else {
+    guard var pending = pendingOtpLock.withLock({ pendingContactVerification }) else {
       throw RainError.invalidConfig(details:
         "No verification code was requested; call sendContactVerificationCode first")
     }
     do {
-      let token = try await context.verifyOtpToken(
-        otpId: pending.challenge.otpId,
-        otpCode: code,
-        otpEncryptionTargetBundle: pending.challenge.encryptionTargetBundle
+      let publicKey = try context.createOtpKeyPair()
+      let encrypted = try context.encryptOtpCode(
+        code,
+        otpEncryptionTargetBundle: pending.challenge.otpEncryptionTargetBundle,
+        publicKey: publicKey
       )
+      let otpId = pending.challenge.otpId
+      let verification = try await withTokenRetry(&pending) { token in
+        try await api.verifyOtp(token: token, otpId: otpId, encryptedOtpBundle: encrypted)
+      }
       switch pending.contact {
       case .email(let email):
-        try await context.setUserEmail(email, verificationToken: token)
+        try await context.setUserEmail(email, verificationToken: verification.verificationToken)
       case .phone(let phone):
-        try await context.setUserPhoneNumber(phone, verificationToken: token)
+        try await context.setUserPhoneNumber(phone, verificationToken: verification.verificationToken)
       }
       pendingOtpLock.withLock { pendingContactVerification = nil }
+    } catch let error as RainApiAuthError where error.kind == .invalidCode {
+      pendingOtpLock.withLock { pendingContactVerification = pending }
+      throw RainError.invalidLoginCode
     } catch {
       throw RainError.from(underlying: error)
     }

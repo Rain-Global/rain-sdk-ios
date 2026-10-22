@@ -10,28 +10,92 @@ import TurnkeySwift
 struct TurnkeyManagedAuthTests {
   init() { TurnkeyErrorMapping.registerOnce() }
 
+  /// A controller over the mock context and a scripted rain-api. The token provider mints
+  /// "wat-1", "wat-2", … and records which contact each was asked for.
+  private final class Harness: @unchecked Sendable {
+    let turnkey: MockTurnkey
+    let api = MockRainApiAuthClient()
+    var tokenRequests: [TurnkeyLoginContact?] = []
+    var tokenProviderError: Error?
+    private(set) var controller: TurnkeyManagedAuthController!
+
+    init(
+      turnkey: MockTurnkey,
+      configurationError: RainError? = nil,
+      rpId: String? = nil,
+      tokenProvider: Bool = true
+    ) {
+      self.turnkey = turnkey
+      controller = TurnkeyManagedAuthController(
+        context: turnkey,
+        configurationError: configurationError,
+        rpId: rpId,
+        api: api,
+        // Strong on purpose: `makeController` hands out the controller alone, and the closure
+        // must outlive the harness that recorded into it. A test-scoped cycle is fine.
+        tokenProvider: tokenProvider ? { @Sendable [self] contact in
+          tokenRequests.append(contact)
+          if let tokenProviderError { throw tokenProviderError }
+          return "wat-\(tokenRequests.count)"
+        } : nil
+      )
+    }
+
+    var tokens: [String] { api.calls.map(\.token) }
+  }
+
   private func makeController(
     turnkey: MockTurnkey,
     configurationError: RainError? = nil,
     rpId: String? = nil
   ) -> TurnkeyManagedAuthController {
-    TurnkeyManagedAuthController(
-      context: turnkey,
-      configurationError: configurationError,
-      rpId: rpId
-    )
+    Harness(turnkey: turnkey, configurationError: configurationError, rpId: rpId).controller
   }
 
-  // MARK: - OTP flow
+  /// The mock context's hook for "a session now exists" after rain-api's login JWT is stored.
+  private func installSessionOnStore(_ turnkey: MockTurnkey) {
+    turnkey.onStoreSession = {
+      turnkey.session = MockTurnkey.defaultSession()
+      turnkey.authState = .authenticated
+    }
+  }
 
-  @Test("sendLoginCode starts an email OTP for the given address")
+  // MARK: - Code login: send
+
+  @Test("sendLoginCode mints a token bound to the contact and starts the code on rain-api")
   func testSendLoginCode() async throws {
-    let turnkey = MockTurnkey(session: nil)
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: nil))
 
-    try await controller.sendLoginCode(to: .email("user@example.com"))
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
 
-    #expect(turnkey.sendOtpCalls == [.init(contact: "user@example.com", otpType: .email)])
+    #expect(h.tokenRequests == [.email("user@example.com")])
+    #expect(h.api.calls == [.init(endpoint: .initOtp, token: "wat-1")])
+  }
+
+  @Test("sendLoginCode without a token provider throws invalidConfig before any call")
+  func testSendLoginCodeWithoutTokenProvider() async {
+    let h = Harness(turnkey: MockTurnkey(session: nil), tokenProvider: false)
+
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    }
+    #expect(h.api.calls.isEmpty)
+  }
+
+  @Test("a token provider failure aborts the flow: a RainError as-is, anything else as providerError")
+  func testTokenProviderFailure() async {
+    let h = Harness(turnkey: MockTurnkey(session: nil))
+    h.tokenProviderError = RainError.unauthorized(details: "backend says no")
+    await #expect(throws: RainError.unauthorized()) {
+      try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    }
+
+    struct HostError: Error {}
+    h.tokenProviderError = HostError()
+    await #expect(throws: RainError.providerError(underlying: HostError())) {
+      try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    }
+    #expect(h.api.calls.isEmpty)
   }
 
   @Test("confirmLoginCode without a prior sendLoginCode throws invalidConfig")
@@ -43,97 +107,162 @@ struct TurnkeyManagedAuthTests {
     }
   }
 
-  @Test("confirmLoginCode completes the OTP with the stashed challenge under a per-attempt key")
-  func testConfirmLoginCodeHappyPath() async throws {
-    let turnkey = MockTurnkey(
-      wallets: [MockTurnkey.dualCurveWallet()],
-      session: nil
-    )
-    turnkey.stubbedOtpChallenge = OtpChallenge(otpId: "otp-1", encryptionTargetBundle: "bundle-1")
-    turnkey.onCompleteOtp = {
-      turnkey.session = MockTurnkey.defaultSession()
-      turnkey.authState = .authenticated
-    }
-    let controller = makeController(turnkey: turnkey)
+  // MARK: - Code login: confirm
 
-    try await controller.sendLoginCode(to: .email("user@example.com"))
-    try await controller.confirmLoginCode("123456")
+  @Test("confirmLoginCode on a returning user: fresh key, encrypted code, verify, signed login, session stored under a per-attempt key")
+  func testConfirmLoginCodeReturningUser() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    installSessionOnStore(turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-existing"
 
-    // No session to supersede — nothing is ever cleared.
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    try await h.controller.confirmLoginCode("123456")
+
+    // One wallet auth token carried the whole flow; no signup for a known contact.
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .login])
+    #expect(Set(h.tokens) == ["wat-1"])
+    // A key pair per attempt; the code encrypted to it against the backend's bundle.
+    #expect(turnkey.createdOtpKeys == ["otp-key-1"])
+    #expect(turnkey.encryptOtpCalls == [.init(code: "123456", otpEncryptionTargetBundle: "bundle-1", publicKey: "otp-key-1")])
+    #expect(h.api.verifyOtpBodies.map(\.otpId) == ["otp-1"])
+    #expect(h.api.verifyOtpBodies.map(\.encryptedOtpBundle) == ["enc(123456)"])
+    // The login message is signed with the key the verification token is bound to.
+    #expect(turnkey.loginMessageCalls == ["vt-1"])
+    #expect(turnkey.signClientMessageCalls == [.init(message: "login:vt-1", publicKey: "otp-key-1")])
+    let login = try #require(h.api.loginBodies.first)
+    #expect(login.verificationToken == "vt-1")
+    #expect(login.clientSignature == RainApiClientSignature(publicKey: "otp-key-1", message: "login:vt-1", signature: "sig(login:vt-1)"))
+    #expect(login.subOrganizationId == nil)
+    // The session JWT lands under a per-attempt key; nothing to supersede, nothing cleared.
+    let stored = try #require(turnkey.storeSessionCalls.first)
+    #expect(stored.jwt == "jwt-1")
+    #expect(stored.sessionKey.hasPrefix("rain-turnkey-"))
     #expect(turnkey.clearStoredSessionCalls.isEmpty)
-    let call = try #require(turnkey.completeOtpCalls.first)
-    #expect(turnkey.completeOtpCalls.count == 1)
-    #expect(call.otpId == "otp-1")
-    #expect(call.otpCode == "123456")
-    #expect(call.otpEncryptionTargetBundle == "bundle-1")
-    #expect(call.contact == "user@example.com")
-    #expect(call.otpType == .email)
-    #expect(call.sessionKey.hasPrefix("rain-turnkey-"))
-    // A signup creates ONE wallet carrying both chain families atomically (one seed).
-    let signupAccounts = try #require(turnkey.completeOtpSignupAccounts.first)
-    #expect(signupAccounts.map(\.addressFormat) == [.address_format_ethereum, .address_format_solana])
-    // With nothing previously selected, the vendor auto-selects — no explicit activation.
     #expect(turnkey.selectStoredSessionCalls.isEmpty)
-    #expect(turnkey.selectedStoredSessionKey == call.sessionKey)
+    #expect(turnkey.selectedStoredSessionKey == stored.sessionKey)
     // Both chain families already provisioned — nothing to create or derive.
     #expect(turnkey.createWalletCalls.isEmpty)
     #expect(turnkey.addAccountsCalls.isEmpty)
-    #expect(controller.currentAuthState() == .authenticated)
+    #expect(h.controller.currentAuthState() == .authenticated)
   }
 
-  @Test("a wrong code leaves an already-active session untouched")
-  func testWrongCodeKeepsExistingSession() async throws {
-    // Regression guard: clearing the stored session before the code is verified logged out a
-    // user who mistyped, with no way back (verifyOtp consumes the code).
-    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
-    turnkey.completeOtpError = TurnkeySwiftError.failedToVerifyOtp(
-      underlying: TurnkeyRequestError.apiError(statusCode: 401, payload: nil)
-    )
-    let controller = makeController(turnkey: turnkey)
-    try await controller.sendLoginCode(to: .email("user@example.com"))
+  @Test("a first login signs up on 404 and logs in again on the same token and verification token")
+  func testConfirmLoginCodeSignsUpNewUser() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    installSessionOnStore(turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.nextSubOrganizationId = "sub-new"
+
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    try await h.controller.confirmLoginCode("123456")
+
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .login, .signup, .login])
+    #expect(Set(h.tokens) == ["wat-1"], "signup does not consume the token")
+    #expect(h.tokenRequests.count == 1)
+    // Signup names the contact only — rain-api provisions the seed and both accounts.
+    #expect(turnkey.signupMessageCalls == [.init(verificationToken: "vt-1", email: "user@example.com", phoneNumber: nil)])
+    let signup = try #require(h.api.signupBodies.first)
+    #expect(signup.clientSignature.message == "signup:vt-1:user@example.com")
+    // The second login carries the new sub-organization id and the same verification token.
+    #expect(h.api.loginBodies.map(\.subOrganizationId) == [nil, "sub-new"])
+    #expect(h.api.loginBodies.map(\.verificationToken) == ["vt-1", "vt-1"])
+    #expect(turnkey.storeSessionCalls.count == 1)
+    #expect(h.controller.currentAuthState() == .authenticated)
+  }
+
+  @Test("a wrong code is invalidLoginCode, keeps the challenge, and leaves a live session untouched")
+  func testWrongCodeKeepsChallengeAndSession() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: MockTurnkey.defaultSession())
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-1"
+    h.api.verifyOtpError = RainApiAuthError(kind: .invalidCode, statusCode: 400, message: "Invalid or expired code")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
 
     await #expect(throws: RainError.invalidLoginCode) {
-      try await controller.confirmLoginCode("999999")
+      try await h.controller.confirmLoginCode("999999")
     }
-
     #expect(turnkey.clearStoredSessionCalls.isEmpty)
-    #expect(turnkey.session != nil)
-    #expect(controller.currentAuthState() == .authenticated)
-    #expect(controller.hasActiveSession())
+    #expect(turnkey.storeSessionCalls.isEmpty)
+    #expect(h.controller.hasActiveSession())
+
+    // The retype goes straight to verify on the same token — no new code, a NEW key pair.
+    h.api.verifyOtpError = nil
+    try await h.controller.confirmLoginCode("123456")
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .verifyOtp, .login])
+    #expect(turnkey.createdOtpKeys == ["otp-key-1", "otp-key-2"])
+  }
+
+  @Test("a failed verification ends the attempt: the next confirm needs a new code")
+  func testVerificationFailedEndsAttempt() async throws {
+    let h = Harness(turnkey: MockTurnkey(session: nil))
+    h.api.verifyOtpError = RainApiAuthError(kind: .verificationFailed, statusCode: 400, message: "Verification failed")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+  }
+
+  @Test("an expired token mid-flow is renewed from the host exactly once, never re-sending the code")
+  func testExpiredTokenRenewedOnce() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    installSessionOnStore(turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-1"
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    h.api.rejectedTokens = ["wat-1"]
+
+    try await h.controller.confirmLoginCode("123456")
+
+    #expect(h.api.calls.map(\.token) == ["wat-1", "wat-1", "wat-2", "wat-2"])
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .verifyOtp, .login])
+    #expect(h.tokenRequests == [.email("user@example.com"), .email("user@example.com")])
+  }
+
+  @Test("a renewed token that is also rejected ends the attempt as unauthorized")
+  func testRenewedTokenRejected() async throws {
+    let h = Harness(turnkey: MockTurnkey(session: nil))
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    h.api.rejectedTokens = ["wat-1", "wat-2"]
+
+    await #expect(throws: RainError.unauthorized()) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(h.tokenRequests.count == 2)
   }
 
   @Test("a successful login over a live session activates the new key and drops only the old one")
   func testReloginSupersedesPreviousSession() async throws {
-    let turnkey = MockTurnkey(
-      wallets: [MockTurnkey.dualCurveWallet()],
-      session: MockTurnkey.defaultSession()
-    )
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: MockTurnkey.defaultSession())
     let previousKey = try #require(turnkey.selectedStoredSessionKey)
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["other@example.com"] = "sub-2"
 
-    try await controller.sendLoginCode(to: .email("other@example.com"))
-    try await controller.confirmLoginCode("123456")
+    try await h.controller.sendLoginCode(to: .email("other@example.com"))
+    try await h.controller.confirmLoginCode("123456")
 
-    let attemptKey = try #require(turnkey.completeOtpCalls.first?.sessionKey)
+    let attemptKey = try #require(turnkey.storeSessionCalls.first?.sessionKey)
     // The vendor keeps the old session selected, so the new one is activated explicitly...
     #expect(turnkey.selectStoredSessionCalls == [attemptKey])
     #expect(turnkey.selectedStoredSessionKey == attemptKey)
     // ...and only the superseded key is purged — never the one just logged in under.
     #expect(turnkey.clearStoredSessionCalls == [previousKey])
-    #expect(controller.hasActiveSession())
+    #expect(h.controller.hasActiveSession())
   }
 
   @Test("confirmLoginCode derives the missing Solana account from the existing wallet's seed")
   func testConfirmProvisionsMissingWallets() async throws {
-    let turnkey = MockTurnkey(
-      wallets: [MockTurnkey.defaultWallet()], // Ethereum account only
-      session: nil
-    )
-    turnkey.onCompleteOtp = { turnkey.session = MockTurnkey.defaultSession() }
-    let controller = makeController(turnkey: turnkey)
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.defaultWallet()], session: nil) // Ethereum only
+    turnkey.onStoreSession = { turnkey.session = MockTurnkey.defaultSession() }
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-legacy"
 
-    try await controller.sendLoginCode(to: .email("user@example.com"))
-    try await controller.confirmLoginCode("123456")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    try await h.controller.confirmLoginCode("123456")
 
     // Never a second wallet (a second seed to back up) — the account is derived on the
     // existing wallet.
@@ -146,15 +275,83 @@ struct TurnkeyManagedAuthTests {
     #expect(call.accounts.first?.curve == .curve_ed25519)
   }
 
+  @Test("a signup that fails ends the attempt: nothing stored, the next confirm needs a new code")
+  func testSignupFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(session: nil)
+    let h = Harness(turnkey: turnkey)
+    h.api.signupError = RainApiAuthError(kind: .conflict, statusCode: 409, message: "Signup in progress")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    let error = await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(error?.code == "RAIN_501")
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .login, .signup])
+    #expect(turnkey.storeSessionCalls.isEmpty)
+    #expect(h.controller.currentAuthState() == .unauthenticated)
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+  }
+
+  @Test("a login that fails after verification ends the attempt without touching a live session")
+  func testLoginFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
+    let h = Harness(turnkey: turnkey)
+    h.api.loginError = RainApiAuthError(kind: .serverError, statusCode: 503, message: "Turnkey is not configured")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(turnkey.storeSessionCalls.isEmpty)
+    #expect(turnkey.clearStoredSessionCalls.isEmpty)
+    #expect(h.controller.hasActiveSession(), "the previous session survives a failed login")
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+  }
+
+  @Test("a signing failure on the device ends the attempt before any login call")
+  func testSigningFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(session: nil)
+    struct NoSuchKey: Error {}
+    turnkey.signClientMessageError = NoSuchKey()
+    let h = Harness(turnkey: turnkey)
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp], "nothing reached /login")
+    #expect(turnkey.storeSessionCalls.isEmpty)
+  }
+
+  @Test("a session the vendor refuses to store ends the attempt with nothing selected or cleared")
+  func testStoreSessionFailureEndsAttempt() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.storeSessionError = TurnkeySwiftError.keyAlreadyExists
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-1"
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+
+    await #expect(throws: RainError.self) {
+      try await h.controller.confirmLoginCode("123456")
+    }
+    #expect(turnkey.selectStoredSessionCalls.isEmpty)
+    #expect(turnkey.clearStoredSessionCalls.isEmpty)
+    #expect(h.controller.currentAuthState() == .unauthenticated)
+  }
+
   @Test("confirmLoginCode with no wallet at all creates one wallet with both accounts")
   func testConfirmCreatesSingleDualAccountWallet() async throws {
-    // An account created outside the signup flow (or predating atomic provisioning).
     let turnkey = MockTurnkey(wallets: [], session: nil)
-    turnkey.onCompleteOtp = { turnkey.session = MockTurnkey.defaultSession() }
-    let controller = makeController(turnkey: turnkey)
+    turnkey.onStoreSession = { turnkey.session = MockTurnkey.defaultSession() }
+    let h = Harness(turnkey: turnkey)
+    h.api.walletsByContact["user@example.com"] = "sub-empty"
 
-    try await controller.sendLoginCode(to: .email("user@example.com"))
-    try await controller.confirmLoginCode("123456")
+    try await h.controller.sendLoginCode(to: .email("user@example.com"))
+    try await h.controller.confirmLoginCode("123456")
 
     #expect(turnkey.createWalletCalls.count == 1)
     let call = try #require(turnkey.createWalletCalls.first)
@@ -162,17 +359,16 @@ struct TurnkeyManagedAuthTests {
     #expect(turnkey.addAccountsCalls.isEmpty)
   }
 
-  @Test("a vendor auth error surfaces as a mapped RainError, never raw")
+  @Test("a rain-api refusal surfaces as a mapped RainError, never raw")
   func testAuthErrorMapping() async {
-    let turnkey = MockTurnkey(session: nil)
-    turnkey.sendOtpError = TurnkeySwiftError.invalidSession
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: nil))
+    h.api.initOtpError = RainApiAuthError(kind: .forbidden, statusCode: 403, message: "Feature not enabled")
 
     do {
-      try await controller.sendLoginCode(to: .email("user@example.com"))
+      try await h.controller.sendLoginCode(to: .email("user@example.com"))
       Issue.record("Expected an error")
     } catch let error as RainError {
-      #expect(error == .tokenExpired)
+      #expect(error == .unauthorized())
     } catch {
       Issue.record("Expected RainError, got \(error)")
     }
@@ -258,94 +454,69 @@ struct TurnkeyManagedAuthTests {
     }
   }
 
-  // MARK: - SMS OTP
+  // MARK: - SMS and contact normalization
 
-  @Test("sendLoginCode to a phone number starts an SMS OTP")
+  @Test("sendLoginCode to a phone number binds the token to the normalized E.164 number")
   func testSendLoginCodeSms() async throws {
-    let turnkey = MockTurnkey(session: nil)
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: nil))
 
-    try await controller.sendLoginCode(to: .phone("+15551234567"))
+    try await h.controller.sendLoginCode(to: .phone(" +1 (555) 123-45.67 "))
 
-    #expect(turnkey.sendOtpCalls == [.init(contact: "+15551234567", otpType: .sms)])
+    // The normalized string is the account identity — identical rule on Android. The device
+    // never sends the contact; the token is bound to it.
+    #expect(h.tokenRequests == [.phone("+15551234567")])
+    #expect(h.api.endpoints == [.initOtp])
   }
 
-  @Test("confirmLoginCode completes an SMS challenge with the SMS type")
-  func testConfirmSmsLoginCode() async throws {
+  @Test("signup for a phone contact names the phone, not an email")
+  func testSmsSignupMessage() async throws {
     let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
-    turnkey.onCompleteOtp = { turnkey.session = MockTurnkey.defaultSession() }
-    let controller = makeController(turnkey: turnkey)
+    installSessionOnStore(turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.tokenContact = "+15551234567"
 
-    try await controller.sendLoginCode(to: .phone("+15551234567"))
-    try await controller.confirmLoginCode("123456")
+    try await h.controller.sendLoginCode(to: .phone("+1 555 123 4567"))
+    try await h.controller.confirmLoginCode("123456")
 
-    let call = try #require(turnkey.completeOtpCalls.first)
-    #expect(call.contact == "+15551234567")
-    #expect(call.otpType == .sms)
+    #expect(turnkey.signupMessageCalls == [.init(verificationToken: "vt-1", email: nil, phoneNumber: "+15551234567")])
   }
 
-  // MARK: - Contact normalization
-
-  @Test("sendLoginCode normalizes phone formatting down to E.164 before anything is sent")
-  func testPhoneNormalization() async throws {
-    let turnkey = MockTurnkey(session: nil)
-    let controller = makeController(turnkey: turnkey)
-
-    try await controller.sendLoginCode(to: .phone(" +1 (555) 123-45.67 "))
-
-    // The normalized string is the account identity — identical rule on Android.
-    #expect(turnkey.sendOtpCalls == [.init(contact: "+15551234567", otpType: .sms)])
-  }
-
-  @Test("confirmLoginCode completes with the normalized contact, not the raw input")
-  func testConfirmUsesNormalizedContact() async throws {
-    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
-    turnkey.onCompleteOtp = { turnkey.session = MockTurnkey.defaultSession() }
-    let controller = makeController(turnkey: turnkey)
-
-    try await controller.sendLoginCode(to: .phone("+1 555 123 4567"))
-    try await controller.confirmLoginCode("123456")
-
-    #expect(turnkey.completeOtpCalls.first?.contact == "+15551234567")
-  }
-
-  @Test("an email is trimmed and lowercased before it is sent")
+  @Test("an email is trimmed and lowercased before the token is minted")
   func testEmailTrimmedAndLowercased() async throws {
-    let turnkey = MockTurnkey(session: nil)
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: nil))
 
-    try await controller.sendLoginCode(to: .email("  User@Example.COM\n"))
+    try await h.controller.sendLoginCode(to: .email("  User@Example.COM\n"))
 
     // The backend compares contacts byte-for-byte; mixed case would mint a second account.
-    #expect(turnkey.sendOtpCalls == [.init(contact: "user@example.com", otpType: .email)])
+    #expect(h.tokenRequests == [.email("user@example.com")])
   }
 
-  @Test("the same inbox in different casing is one identity across login and confirm")
+  @Test("the same inbox in different casing is one identity through signup")
   func testEmailCaseInsensitiveIdentity() async throws {
     let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
-    turnkey.onCompleteOtp = { turnkey.session = MockTurnkey.defaultSession() }
-    let controller = makeController(turnkey: turnkey)
+    installSessionOnStore(turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.tokenContact = "volo@example.com"
 
-    try await controller.sendLoginCode(to: .email("Volo@Example.com"))
-    try await controller.confirmLoginCode("123456")
+    try await h.controller.sendLoginCode(to: .email("Volo@Example.com"))
+    try await h.controller.confirmLoginCode("123456")
 
-    #expect(turnkey.completeOtpCalls.first?.contact == "volo@example.com")
+    #expect(turnkey.signupMessageCalls.first?.email == "volo@example.com")
   }
 
   @Test("contact verification attaches the lowercased email, not the raw input")
   func testContactVerificationLowercasesEmail() async throws {
-    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: MockTurnkey.defaultSession()))
 
-    try await controller.sendContactVerificationCode(to: .email("Second@Example.COM"))
-    try await controller.confirmContactVerification("123456")
+    try await h.controller.sendContactVerificationCode(to: .email("Second@Example.COM"))
+    try await h.controller.confirmContactVerification("123456")
 
-    #expect(turnkey.sendOtpCalls.first?.contact == "second@example.com")
-    #expect(turnkey.setUserEmailCalls.map(\.contact) == ["second@example.com"])
+    #expect(h.tokenRequests == [.email("second@example.com")])
+    #expect(h.turnkey.setUserEmailCalls.map(\.contact) == ["second@example.com"])
   }
 
   @Test(
-    "an invalid contact throws invalidConfig locally, before anything is sent",
+    "an invalid contact throws invalidConfig locally, before a token is minted",
     arguments: [
       TurnkeyLoginContact.phone("5551234567"),      // no leading +: the country can't be guessed
       TurnkeyLoginContact.phone("+1555"),           // too short
@@ -354,25 +525,24 @@ struct TurnkeyManagedAuthTests {
     ]
   )
   func testInvalidContactFailsFast(contact: TurnkeyLoginContact) async {
-    let turnkey = MockTurnkey(session: nil)
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: nil))
 
     await #expect(throws: RainError.self) {
-      try await controller.sendLoginCode(to: contact)
+      try await h.controller.sendLoginCode(to: contact)
     }
-    #expect(turnkey.sendOtpCalls.isEmpty)
+    #expect(h.tokenRequests.isEmpty)
+    #expect(h.api.calls.isEmpty)
   }
 
   @Test("contact verification attaches the normalized phone, not the raw input")
   func testContactVerificationNormalizes() async throws {
-    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: MockTurnkey.defaultSession()))
 
-    try await controller.sendContactVerificationCode(to: .phone("+1 (555) 123-4567"))
-    try await controller.confirmContactVerification("123456")
+    try await h.controller.sendContactVerificationCode(to: .phone("+1 (555) 123-4567"))
+    try await h.controller.confirmContactVerification("123456")
 
-    #expect(turnkey.sendOtpCalls.first?.contact == "+15551234567")
-    #expect(turnkey.setUserPhoneNumberCalls.map(\.contact) == ["+15551234567"])
+    #expect(h.tokenRequests == [.phone("+15551234567")])
+    #expect(h.turnkey.setUserPhoneNumberCalls.map(\.contact) == ["+15551234567"])
   }
 
   // MARK: - Passkeys
@@ -522,66 +692,61 @@ struct TurnkeyManagedAuthTests {
 
   @Test("sendContactVerificationCode requires an active session")
   func testContactVerificationRequiresSession() async {
-    let controller = makeController(turnkey: MockTurnkey(session: nil))
+    let h = Harness(turnkey: MockTurnkey(session: nil))
 
     await #expect(throws: RainError.tokenExpired) {
-      try await controller.sendContactVerificationCode(to: .email("new@example.com"))
+      try await h.controller.sendContactVerificationCode(to: .email("new@example.com"))
     }
+    #expect(h.tokenRequests.isEmpty)
   }
 
-  @Test("confirmContactVerification attaches a verified email to the current account")
+  @Test("confirmContactVerification verifies on rain-api with a token for the NEW contact and attaches it verified")
   func testAttachEmailContact() async throws {
     let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
-    turnkey.stubbedOtpChallenge = OtpChallenge(otpId: "otp-9", encryptionTargetBundle: "bundle-9")
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: turnkey)
+    h.api.challenge = RainApiOtpChallenge(otpId: "otp-9", otpEncryptionTargetBundle: "bundle-9")
+    h.api.verificationToken = "vt-9"
 
-    try await controller.sendContactVerificationCode(to: .email("new@example.com"))
-    try await controller.confirmContactVerification("123456")
+    try await h.controller.sendContactVerificationCode(to: .email("new@example.com"))
+    try await h.controller.confirmContactVerification("123456")
 
-    #expect(turnkey.sendOtpCalls == [.init(contact: "new@example.com", otpType: .email)])
-    #expect(turnkey.verifyOtpTokenCalls == [
-      .init(otpId: "otp-9", otpCode: "123456", otpEncryptionTargetBundle: "bundle-9")
-    ])
+    #expect(h.tokenRequests == [.email("new@example.com")])
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp], "no login, no signup")
+    #expect(turnkey.encryptOtpCalls == [.init(code: "123456", otpEncryptionTargetBundle: "bundle-9", publicKey: "otp-key-1")])
     // The token is what marks the contact VERIFIED — a login method, not just profile data.
-    #expect(turnkey.setUserEmailCalls == [
-      .init(contact: "new@example.com", verificationToken: turnkey.stubbedVerificationToken)
-    ])
+    #expect(turnkey.setUserEmailCalls == [.init(contact: "new@example.com", verificationToken: "vt-9")])
     #expect(turnkey.setUserPhoneNumberCalls.isEmpty)
     // No login happened: the session machinery was never touched.
-    #expect(turnkey.completeOtpCalls.isEmpty)
+    #expect(turnkey.storeSessionCalls.isEmpty)
     #expect(turnkey.clearStoredSessionCalls.isEmpty)
   }
 
   @Test("confirmContactVerification attaches a verified phone number")
   func testAttachPhoneContact() async throws {
-    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
-    let controller = makeController(turnkey: turnkey)
+    let h = Harness(turnkey: MockTurnkey(session: MockTurnkey.defaultSession()))
 
-    try await controller.sendContactVerificationCode(to: .phone("+15551234567"))
-    try await controller.confirmContactVerification("123456")
+    try await h.controller.sendContactVerificationCode(to: .phone("+15551234567"))
+    try await h.controller.confirmContactVerification("123456")
 
-    #expect(turnkey.sendOtpCalls.first?.otpType == .sms)
-    #expect(turnkey.setUserPhoneNumberCalls.map(\.contact) == ["+15551234567"])
-    #expect(turnkey.setUserEmailCalls.isEmpty)
+    #expect(h.turnkey.setUserPhoneNumberCalls.map(\.contact) == ["+15551234567"])
+    #expect(h.turnkey.setUserEmailCalls.isEmpty)
   }
 
   @Test("a wrong contact-verification code maps to invalidLoginCode and keeps the challenge")
   func testWrongContactVerificationCodeIsRetryable() async throws {
-    let turnkey = MockTurnkey(session: MockTurnkey.defaultSession())
-    turnkey.verifyOtpTokenError = TurnkeySwiftError.failedToVerifyOtp(
-      underlying: TurnkeyRequestError.apiError(statusCode: 401, payload: nil)
-    )
-    let controller = makeController(turnkey: turnkey)
-    try await controller.sendContactVerificationCode(to: .email("new@example.com"))
+    let h = Harness(turnkey: MockTurnkey(session: MockTurnkey.defaultSession()))
+    h.api.verifyOtpError = RainApiAuthError(kind: .invalidCode, statusCode: 400, message: "Invalid or expired code")
+    try await h.controller.sendContactVerificationCode(to: .email("new@example.com"))
 
     await #expect(throws: RainError.invalidLoginCode) {
-      try await controller.confirmContactVerification("999999")
+      try await h.controller.confirmContactVerification("999999")
     }
 
     // The challenge survives the wrong code: a retype succeeds without a new send.
-    turnkey.verifyOtpTokenError = nil
-    try await controller.confirmContactVerification("123456")
-    #expect(turnkey.setUserEmailCalls.map(\.contact) == ["new@example.com"])
+    h.api.verifyOtpError = nil
+    try await h.controller.confirmContactVerification("123456")
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp, .verifyOtp])
+    #expect(h.turnkey.setUserEmailCalls.map(\.contact) == ["new@example.com"])
   }
 
   // MARK: - Key export
@@ -703,10 +868,15 @@ struct TurnkeyManagedAuthTests {
 
   // MARK: - Provider surface
 
+  private static let testBackend = TurnkeyManagedAuthBackend(
+    baseURL: URL(string: "https://api-dev.rain.xyz")!,
+    tokenProvider: { _ in "wat-test" }
+  )
+
   @Test("auth methods on a BYO-mode provider throw invalidConfig")
   func testByoModeGuard() async {
     let provider = TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy"),
+      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy", authBackend: Self.testBackend),
       context: MockTurnkey(session: nil),
       managedAuth: nil // what a BYO construction yields
     )
@@ -724,21 +894,25 @@ struct TurnkeyManagedAuthTests {
     }
   }
 
-  @Test("managed provider forwards the OTP flow to the controller")
+  @Test("managed provider forwards the code flow to the controller")
   func testManagedProviderForwards() async throws {
-    let turnkey = MockTurnkey(session: nil)
-    turnkey.onCompleteOtp = { turnkey.session = MockTurnkey.defaultSession() }
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.onStoreSession = { turnkey.session = MockTurnkey.defaultSession() }
+    let api = MockRainApiAuthClient()
+    api.walletsByContact["user@example.com"] = "sub-1"
     let provider = TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy"),
+      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy", authBackend: Self.testBackend),
       context: turnkey,
-      managedAuth: TurnkeyManagedAuthController(context: turnkey, configurationError: nil)
+      managedAuth: TurnkeyManagedAuthController(
+        context: turnkey, configurationError: nil, api: api, tokenProvider: Self.testBackend.tokenProvider
+      )
     )
 
     try await provider.sendLoginCode(to: .email("user@example.com"))
     try await provider.confirmLoginCode("123456")
 
-    #expect(turnkey.sendOtpCalls.count == 1)
-    #expect(turnkey.completeOtpCalls.count == 1)
+    #expect(api.endpoints == [.initOtp, .verifyOtp, .login])
+    #expect(turnkey.storeSessionCalls.count == 1)
     #expect(provider.hasActiveSession())
   }
 

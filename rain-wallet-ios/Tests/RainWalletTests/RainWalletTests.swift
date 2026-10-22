@@ -17,6 +17,24 @@ struct RainWalletTests {
     TurnkeyManagedConfigurator.sharedContext = { StubBackendContext() }
   }
 
+  private static let backend = TurnkeyManagedAuthBackend(
+    baseURL: URL(string: "https://api-dev.rain.xyz")!,
+    tokenProvider: { _ in "wat-stub" }
+  )
+
+  /// A backing provider over the stub context and a canned rain-api.
+  private static func backing(
+    _ stub: StubBackendContext, rpId: String? = nil, api: StubRainApiAuthClient = StubRainApiAuthClient()
+  ) -> TurnkeyProvider {
+    TurnkeyProvider(
+      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth", authBackend: backend, rpId: rpId),
+      context: stub,
+      managedAuth: TurnkeyManagedAuthController(
+        context: stub, configurationError: nil, rpId: rpId, api: api, tokenProvider: backend.tokenProvider
+      )
+    )
+  }
+
   // MARK: - State mapping
 
   @Test("session states map one-to-one onto the neutral enum")
@@ -66,6 +84,38 @@ struct RainWalletTests {
     #expect(RainProvider(RainWalletConfig(sponsorGas: false)).capabilities == [.export, .multiChain])
   }
 
+  // MARK: - Configuration wiring
+
+  @Test("the environment maps to Rain's hosts, production by default")
+  func testEnvironmentWiring() {
+    #expect(RainProvider(RainWalletConfig()).backing.managedAuthBackend?.baseURL.absoluteString == "https://api.rain.xyz")
+    #expect(RainProvider(RainWalletConfig(environment: .sandbox)).backing.managedAuthBackend?.baseURL.absoluteString == "https://api-dev.rain.xyz")
+    let staging = URL(string: "https://staging.example/api")!
+    #expect(RainProvider(RainWalletConfig(environment: .custom(staging))).backing.managedAuthBackend?.baseURL == staging)
+  }
+
+  @Test("the token provider is handed to the backend with the contact translated, nil stays nil")
+  func testTokenProviderWiring() async throws {
+    let asked = Asked()
+    let provider = RainProvider(RainWalletConfig(authTokenProvider: { contact in
+      await asked.record(contact)
+      return "wat-from-host"
+    }))
+    let backendProvider = try #require(provider.backing.managedAuthBackend?.tokenProvider)
+
+    #expect(try await backendProvider(.email("user@example.com")) == "wat-from-host")
+    #expect(try await backendProvider(.phone("+15551234567")) == "wat-from-host")
+    #expect(try await backendProvider(nil) == "wat-from-host")
+    #expect(await asked.contacts == [.email("user@example.com"), .phone("+15551234567"), nil])
+
+    #expect(RainProvider(RainWalletConfig()).backing.managedAuthBackend?.tokenProvider == nil)
+  }
+
+  private actor Asked {
+    var contacts: [RainWalletContact?] = []
+    func record(_ contact: RainWalletContact?) { contacts.append(contact) }
+  }
+
   // MARK: - Key export
 
   @Test("export methods delegate to the backend with the right account and encoding")
@@ -75,11 +125,7 @@ struct RainWalletTests {
     // seams inject the stub directly instead.
     let stub = StubBackendContext()
     stub.wallets = [Self.dualAccountWallet()]
-    let provider = RainProvider(backing: TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth"),
-      context: stub,
-      managedAuth: TurnkeyManagedAuthController(context: stub, configurationError: nil)
-    ))
+    let provider = RainProvider(backing: Self.backing(stub))
 
     let phrase = try await provider.exportRecoveryPhrase()
     let ethKey = try await provider.exportPrivateKey(.ethereum)
@@ -149,11 +195,7 @@ struct RainWalletTests {
     stub.session = Self.stubSession()
     stub.authState = .authenticated
     stub.wallets = [Self.dualAccountWallet()]
-    let provider = RainProvider(backing: TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth"),
-      context: stub,
-      managedAuth: TurnkeyManagedAuthController(context: stub, configurationError: nil)
-    ))
+    let provider = RainProvider(backing: Self.backing(stub))
     #expect(provider.hasActiveSession())
 
     provider.close()
@@ -177,13 +219,8 @@ struct RainWalletTests {
     let stub = StubBackendContext()
     stub.session = Self.stubSession()
     stub.authState = .authenticated
-    let provider = RainProvider(backing: TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth", rpId: "passkeys.rain.xyz"),
-      context: stub,
-      managedAuth: TurnkeyManagedAuthController(
-        context: stub, configurationError: nil, rpId: "passkeys.rain.xyz"
-      )
-    ))
+    let api = StubRainApiAuthClient()
+    let provider = RainProvider(backing: Self.backing(stub, rpId: "passkeys.rain.xyz", api: api))
     let anchor = ASPresentationAnchor()
 
     try await provider.loginWithPasskey(anchor: anchor)
@@ -194,7 +231,9 @@ struct RainWalletTests {
     #expect(stub.loginWithPasskeyCallCount == 1)
     #expect(stub.addPasskeyCalls == ["passkeys.rain.xyz"])
     #expect(stub.setUserPhoneNumberCalls.map(\.0) == ["+15551234567"])
-    #expect(stub.setUserPhoneNumberCalls.first?.1 == stub.stubbedVerificationToken)
+    // The verification token rain-api returned is what marks the contact verified.
+    #expect(stub.setUserPhoneNumberCalls.first?.1 == api.verificationToken)
+    #expect(api.tokens == ["wat-stub", "wat-stub"], "init + verify ride on the host-minted token")
   }
 
   /// `Session` has no public memberwise init — round-trip through its Codable conformance.

@@ -91,6 +91,8 @@ let package = Package(
         .product(name: "TurnkeyTypes", package: "swift-sdk"),
         .product(name: "TurnkeyCrypto", package: "swift-sdk"),
         .product(name: "TurnkeyPasskeys", package: "swift-sdk"),
+        // Managed auth signs rain-api's client message with the per-attempt key (`Stamper`).
+        .product(name: "TurnkeyStamper", package: "swift-sdk"),
       ],
       path: "rain-turnkey-ios/Sources/RainTurnkey"
     ),
