@@ -113,6 +113,16 @@ public struct TurnkeyManagedAuthBackend: @unchecked Sendable {
   }
 }
 
+/// rain-api is still finishing (or holding a 120-second lock after) an earlier attempt to create
+/// this passkey's account. The registration is kept; call `signUpWithPasskey` again shortly and
+/// the SDK resends it without a new Face ID prompt.
+internal struct TurnkeyPasskeySignupInProgress: LocalizedError, Equatable {
+  let message: String
+  var errorDescription: String? {
+    "Passkey signup is still in progress on the backend — try again in a couple of minutes (\(message))"
+  }
+}
+
 // MARK: - Key export
 
 /// Chain-family selector for a single-key export.
@@ -188,6 +198,9 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   private let api: any RainApiAuthClientProtocol
   /// Mints the wallet auth token each code flow rides on; `nil` = no backend wired by the host.
   private let tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?
+  /// A passkey registration whose `/signup/passkey` outcome is unknown, kept so the next signup
+  /// resends it instead of minting a second passkey (see `PendingPasskeySignupStore`).
+  private let pendingPasskeySignups: any PendingPasskeySignupStore
 
   /// One code flow in flight: the token it rides on, the challenge rain-api issued, and the
   /// normalized contact the token is bound to.
@@ -237,13 +250,15 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     configurationError: RainError?,
     rpId: String? = nil,
     api: any RainApiAuthClientProtocol,
-    tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?
+    tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?,
+    pendingPasskeySignups: any PendingPasskeySignupStore = UserDefaultsPendingPasskeySignupStore()
   ) {
     self.context = context
     self.configurationError = configurationError
     self.rpId = rpId
     self.api = api
     self.tokenProvider = tokenProvider
+    self.pendingPasskeySignups = pendingPasskeySignups
   }
 
   // MARK: State
@@ -492,35 +507,41 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   /// use `loginWithPasskey` (or a login code): every call here mints a fresh account.
   ///
   /// Order matters for what a failure leaves behind: the token is minted before the ceremony so
-  /// a host without a backend fails before Face ID; a `/signup/passkey` refusal leaves a
-  /// keychain passkey that no account knows (the user can delete it in Settings) but no
-  /// account; a login failure after a successful signup leaves an account the same passkey can
-  /// sign into with `loginWithPasskey`.
+  /// a host without a backend fails before Face ID. A signup whose outcome is UNKNOWN — timeout,
+  /// transport failure, 5xx, rate limit — keeps the registration (persisted), and the next call
+  /// resends it rather than registering a second passkey: rain-api may have created the account
+  /// past our timeout, and only a resend of the same credential lets it record that account.
+  /// A definitive refusal clears it. A login failure after a successful signup leaves an account
+  /// the same passkey signs into with `loginWithPasskey`.
   internal func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try throwIfMisconfigured()
     let rpId = try requirePasskeysConfigured()
     try await refuseIfLivePasskeySession()
     let token = try await mintToken(for: nil)
+
     let registration: PasskeyRegistration
-    do {
-      registration = try await context.registerPasskey(anchor: anchor, rpId: rpId)
-    } catch {
-      throw RainError.from(underlying: error)
+    let resuming: Bool
+    if let pending = pendingPasskeySignups.load() {
+      registration = pending
+      resuming = true
+    } else {
+      do {
+        registration = try await context.registerPasskey(anchor: anchor, rpId: rpId)
+      } catch {
+        throw RainError.from(underlying: error)
+      }
+      // Saved BEFORE the call: an unknown outcome must find it here.
+      pendingPasskeySignups.save(registration)
+      resuming = false
     }
-    do {
-      _ = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
-    } catch let error as RainApiAuthError where error.kind == .conflict {
-      throw RainError.invalidConfig(details:
-        "This passkey already belongs to a wallet — sign in with loginWithPasskey instead: \(error.message)")
-    } catch {
-      throw RainError.from(underlying: error)
-    }
+
+    try await signUpPasskey(token: token, registration: registration, resuming: resuming)
+
     let previousKey = context.selectedStoredSessionKey
     preparePasskeyDefaultKey()
     do {
       try await context.loginWithTurnkeyPasskey(anchor: anchor)
     } catch {
-      // The account exists; the passkey signs into it next time via loginWithPasskey.
       throw RainError.from(underlying: error)
     }
     try await activatePasskeySession(previousKey: previousKey)
@@ -528,6 +549,71 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       try await ensureWallets()
     } catch {
       throw RainError.from(underlying: error)
+    }
+  }
+
+  /// `/signup/passkey` with the one-renewal token rule, sorting its endings into what the
+  /// pending store must do. Returns normally when an account for this passkey exists — created
+  /// now, or (on a resend) found from the earlier try.
+  private func signUpPasskey(
+    token: String,
+    registration: PasskeyRegistration,
+    resuming: Bool
+  ) async throws {
+    do {
+      do {
+        _ = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
+      } catch let error as RainApiAuthError where error.kind == .tokenRejected {
+        // The user has already done Face ID; giving up would leave a passkey no account knows
+        // and make the next try mint a look-alike. Same one-renewal rule as the code flow.
+        let renewed = try await mintToken(for: nil)
+        _ = try await api.signupPasskey(token: renewed, attestation: registration.apiAttestation)
+      }
+      pendingPasskeySignups.clear()
+    } catch is CancellationError {
+      throw CancellationError() // outcome unknown: the registration stays
+    } catch let error as RainApiAuthError {
+      switch Self.passkeySignupEnding(error, resuming: resuming) {
+      case .accountExists:
+        pendingPasskeySignups.clear()
+      case .inProgress:
+        throw RainError.providerError(underlying: TurnkeyPasskeySignupInProgress(message: error.message))
+      case .refused:
+        pendingPasskeySignups.clear()
+        if error.kind == .conflict {
+          throw RainError.invalidConfig(details:
+            "This passkey already belongs to a wallet — sign in with loginWithPasskey instead: \(error.message)")
+        }
+        throw error.rainError
+      case .unknown:
+        throw error.rainError
+      }
+    } catch {
+      // Transport failure or an unreadable answer: rain-api may still be creating the account.
+      if Task.isCancelled { throw CancellationError() }
+      throw RainError.from(underlying: error)
+    }
+  }
+
+  private enum PasskeySignupEnding { case accountExists, inProgress, refused, unknown }
+
+  /// rain-api carries no machine code, so its 409s are told apart by message: "signup in
+  /// progress" (a 120 s lock after a failed create — retry shortly, keep the registration),
+  /// "already has a wallet" (on a RESEND, the earlier try worked), anything else a refusal.
+  /// 5xx and rate limits leave the outcome unknown; the rest is definitive.
+  private static func passkeySignupEnding(_ error: RainApiAuthError, resuming: Bool) -> PasskeySignupEnding {
+    let message = error.message.lowercased()
+    switch error.kind {
+    case .conflict where message.contains("progress"):
+      return .inProgress
+    case .conflict where resuming && message.contains("wallet"):
+      return .accountExists
+    case .conflict:
+      return .refused
+    case .serverError, .rateLimited, .other:
+      return .unknown
+    case .tokenRejected, .forbidden, .invalidCode, .verificationFailed, .noWallet:
+      return .refused
     }
   }
 

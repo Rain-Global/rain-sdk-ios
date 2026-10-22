@@ -15,6 +15,7 @@ struct TurnkeyManagedAuthTests {
   private final class Harness: @unchecked Sendable {
     let turnkey: MockTurnkey
     let api = MockRainApiAuthClient()
+    let pendingSignups = InMemoryPendingPasskeySignupStore()
     var tokenRequests: [TurnkeyLoginContact?] = []
     var tokenProviderError: Error?
     private(set) var controller: TurnkeyManagedAuthController!
@@ -37,7 +38,8 @@ struct TurnkeyManagedAuthTests {
           tokenRequests.append(contact)
           if let tokenProviderError { throw tokenProviderError }
           return "wat-\(tokenRequests.count)"
-        } : nil
+        } : nil,
+        pendingPasskeySignups: pendingSignups
       )
     }
 
@@ -653,12 +655,10 @@ struct TurnkeyManagedAuthTests {
     #expect(turnkey.registerPasskeyCalls == ["passkeys.rain.xyz"])
     #expect(h.api.calls == [.init(endpoint: .signupPasskey, token: "wat-1")])
     #expect(h.api.passkeyBodies == [turnkey.stubbedRegistration.apiAttestation])
-    // Signup returns no session, so the session comes from the vendor's passkey login (the
-    // second biometric prompt), stored under the vendor's default key and auto-selected.
+    // Signup returns no session, so it comes from the vendor's passkey login (second prompt).
     #expect(turnkey.loginWithPasskeyCallCount == 1)
     #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
     #expect(turnkey.selectStoredSessionCalls.isEmpty)
-    // rain-api provisioned both accounts — nothing left for the backfill to do.
     #expect(turnkey.createWalletCalls.isEmpty)
     #expect(turnkey.addAccountsCalls.isEmpty)
     #expect(h.controller.currentAuthState() == .authenticated)
@@ -675,6 +675,136 @@ struct TurnkeyManagedAuthTests {
     }
     #expect(turnkey.registerPasskeyCalls.isEmpty, "no Face ID for a flow that cannot complete")
     #expect(h.api.calls.isEmpty)
+  }
+
+  @MainActor
+  @Test("an expired token at /signup/passkey is renewed once, reusing the passkey already registered")
+  func testPasskeySignupTokenRenewedOnce() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.api.rejectedTokens = ["wat-1"]
+
+    try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+
+    #expect(turnkey.registerPasskeyCalls.count == 1, "one Face ID, not two look-alike passkeys")
+    #expect(h.api.calls.map(\.token) == ["wat-1", "wat-2"])
+    #expect(h.tokenRequests == [nil, nil])
+    #expect(turnkey.loginWithPasskeyCallCount == 1)
+
+    let again = Harness(turnkey: MockTurnkey(session: nil), rpId: "passkeys.rain.xyz")
+    again.api.rejectedTokens = ["wat-1", "wat-2"]
+    await #expect(throws: RainError.unauthorized()) {
+      try await again.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(again.turnkey.loginWithPasskeyCallCount == 0)
+  }
+
+  @MainActor
+  @Test("a signup whose outcome is unknown keeps the registration; the next tap resends it without a new ceremony")
+  func testUnknownSignupOutcomeIsResent() async throws {
+    for failure: Error in [
+      RainApiAuthError(kind: .serverError, statusCode: 504, message: "upstream timeout"),
+      URLError(.timedOut),
+      RainApiAuthError(kind: .rateLimited, statusCode: 429, message: "Too many attempts"),
+    ] {
+      let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+      turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
+      let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+      h.api.signupPasskeyError = failure
+
+      await #expect(throws: RainError.self) {
+        try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+      }
+      #expect(h.pendingSignups.registration == turnkey.stubbedRegistration, "\(failure)")
+      #expect(turnkey.loginWithPasskeyCallCount == 0)
+
+      h.api.signupPasskeyError = nil
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+
+      #expect(turnkey.registerPasskeyCalls.count == 1, "\(failure)")
+      #expect(h.api.passkeyBodies.count == 2)
+      #expect(h.api.passkeyBodies[0] == h.api.passkeyBodies[1])
+      #expect(h.api.calls.map(\.token) == ["wat-1", "wat-2"])
+      #expect(h.pendingSignups.registration == nil, "cleared once the account is known to exist")
+      #expect(turnkey.loginWithPasskeyCallCount == 1)
+    }
+  }
+
+  @MainActor
+  @Test("a resend answered 'already has a wallet' means the first try landed: sign in, clear the registration")
+  func testResendFindsTheEarlierAccount() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.pendingSignups.registration = turnkey.stubbedRegistration // left by an earlier unknown outcome
+    h.api.signupPasskeyError = RainApiAuthError(kind: .conflict, statusCode: 409, message: "Passkey already has a wallet")
+
+    try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+
+    #expect(turnkey.registerPasskeyCalls.isEmpty)
+    #expect(turnkey.loginWithPasskeyCallCount == 1)
+    #expect(h.pendingSignups.registration == nil)
+    #expect(h.controller.hasActiveSession())
+  }
+
+  @MainActor
+  @Test("a resend answered 'signup in progress' keeps the registration and asks the host to retry shortly")
+  func testResendDuringBackendLock() async throws {
+    let turnkey = MockTurnkey(session: nil)
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.pendingSignups.registration = turnkey.stubbedRegistration
+    h.api.signupPasskeyError = RainApiAuthError(kind: .conflict, statusCode: 409, message: "Signup in progress")
+
+    do {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+      Issue.record("expected the in-progress error")
+    } catch let error as RainError {
+      guard case .providerError(let underlying) = error else {
+        Issue.record("got \(error)")
+        return
+      }
+      #expect(underlying is TurnkeyPasskeySignupInProgress)
+    }
+    #expect(turnkey.registerPasskeyCalls.isEmpty)
+    #expect(turnkey.loginWithPasskeyCallCount == 0)
+    #expect(h.pendingSignups.registration == turnkey.stubbedRegistration, "kept for the next try")
+  }
+
+  @MainActor
+  @Test("a definitive refusal clears the registration, so the next tap runs a fresh ceremony")
+  func testDefinitiveRefusalClearsRegistration() async throws {
+    let turnkey = MockTurnkey(session: nil)
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.api.signupPasskeyError = RainApiAuthError(kind: .forbidden, statusCode: 403, message: "Flag off")
+
+    await #expect(throws: RainError.unauthorized()) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(h.pendingSignups.saveCount == 1 && h.pendingSignups.registration == nil)
+
+    h.api.signupPasskeyError = RainApiAuthError(kind: .forbidden, statusCode: 403, message: "Flag off")
+    await #expect(throws: RainError.unauthorized()) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(turnkey.registerPasskeyCalls.count == 2)
+  }
+
+  @Test("the persisted store round-trips a registration and clears it")
+  func testUserDefaultsStoreRoundTrip() {
+    let suite = "rain-tests-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = UserDefaultsPendingPasskeySignupStore(defaults: defaults)
+    let registration = PasskeyRegistration(
+      challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao",
+      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
+    )
+    #expect(store.load() == nil)
+    store.save(registration)
+    #expect(store.load() == registration)
+    store.clear()
+    #expect(store.load() == nil)
   }
 
   @MainActor
@@ -724,8 +854,6 @@ struct TurnkeyManagedAuthTests {
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
 
     #expect(turnkey.selectStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey])
-    // Storage-only pre-purge of the stale default key, then the superseded session — the same
-    // dance as passkey login, now around the post-signup login call.
     #expect(turnkey.clearStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey, previousKey])
     #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
   }
@@ -978,7 +1106,8 @@ struct TurnkeyManagedAuthTests {
       config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy", authBackend: Self.testBackend),
       context: turnkey,
       managedAuth: TurnkeyManagedAuthController(
-        context: turnkey, configurationError: nil, api: api, tokenProvider: Self.testBackend.tokenProvider
+        context: turnkey, configurationError: nil, api: api, tokenProvider: Self.testBackend.tokenProvider,
+        pendingPasskeySignups: InMemoryPendingPasskeySignupStore()
       )
     )
 

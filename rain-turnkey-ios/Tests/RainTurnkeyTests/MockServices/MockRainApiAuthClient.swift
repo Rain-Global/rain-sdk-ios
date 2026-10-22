@@ -92,3 +92,13 @@ final class MockRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
     return RainApiSignup(subOrganizationId: nextSubOrganizationId)
   }
 }
+
+/// In-memory stand-in for the persisted pending-signup store.
+final class InMemoryPendingPasskeySignupStore: PendingPasskeySignupStore, @unchecked Sendable {
+  var registration: PasskeyRegistration?
+  var saveCount = 0
+  var clearCount = 0
+  func load() -> PasskeyRegistration? { registration }
+  func save(_ registration: PasskeyRegistration) { self.registration = registration; saveCount += 1 }
+  func clear() { registration = nil; clearCount += 1 }
+}

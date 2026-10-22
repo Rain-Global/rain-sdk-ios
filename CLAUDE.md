@@ -197,9 +197,18 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   refusals mapped) → vendor `loginWithTurnkeyPasskey` for the session (SECOND biometric
   prompt; signup returns no session — backend ask) inside the same prepare/activate/purge
   dance as login. `signUpWithTurnkeyPasskey` (vendor proxy signup + customWallet) is GONE;
-  `addPasskeyAuthenticator` unchanged. Failure residue: a refused signup leaves a keychain
-  passkey no account knows; a failed post-signup login leaves an account the passkey can
-  `loginWithPasskey` into. `authProxyConfigId` stays until H4. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
+  `addPasskeyAuthenticator` unchanged. UNKNOWN-OUTCOME RULE (review #47): rain-api keeps
+  creating the account past our timeout and only RECORDS a lost account when the SAME credential
+  is resent to /signup/passkey — a dropped registration would mean a second passkey + second
+  account while the first passkey still signs into an account Rain cannot see (webhooks dropped,
+  absent from dashboards). So the registration is saved to `PendingPasskeySignupStore`
+  (UserDefaults, public attestation material) BEFORE the call; transport/5xx/429/cancellation
+  keep it, and the next `signUpWithPasskey` RESENDS it (no ceremony, fresh token). Resend
+  endings: 409 "wallet" → account exists → login; 409 "progress" → 120 s backend lock →
+  `providerError(TurnkeyPasskeySignupInProgress)`, keep; definitive refusals clear. Token
+  rejected at /signup/passkey → ONE renewal (same rule as codes). Failure residue: a refused
+  signup leaves a keychain passkey no account knows; a failed post-signup login leaves an
+  account the passkey can `loginWithPasskey` into. `authProxyConfigId` stays until H4. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
   comment) feeds `prepareRainWallet`'s provider. Host surface: `RainWalletConfig`
   gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz) / .custom(URL)`
   (DEFAULT .production) and `authTokenProvider: (RainWalletContact?) async throws -> String`

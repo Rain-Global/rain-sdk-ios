@@ -148,3 +148,10 @@ final class StubRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
     return RainApiSignup(subOrganizationId: "sub")
   }
 }
+
+final class StubPendingPasskeySignupStore: PendingPasskeySignupStore, @unchecked Sendable {
+  var registration: PasskeyRegistration?
+  func load() -> PasskeyRegistration? { registration }
+  func save(_ registration: PasskeyRegistration) { self.registration = registration }
+  func clear() { registration = nil }
+}

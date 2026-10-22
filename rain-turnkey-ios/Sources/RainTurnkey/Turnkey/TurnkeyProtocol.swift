@@ -170,7 +170,7 @@ internal protocol TurnkeyContextProtocol: AnyObject {
 /// A freshly registered passkey, in the shape rain-api's `/signup/passkey` validates (the
 /// vendor's `v1Attestation` plus the challenge). Module-owned so mocks need not build the
 /// vendor type.
-internal struct PasskeyRegistration: Sendable, Equatable {
+internal struct PasskeyRegistration: Sendable, Equatable, Codable {
   let challenge: String
   let credentialId: String
   let clientDataJson: String
