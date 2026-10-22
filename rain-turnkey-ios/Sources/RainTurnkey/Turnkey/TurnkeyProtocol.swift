@@ -135,13 +135,10 @@ internal protocol TurnkeyContextProtocol: AnyObject {
   /// ignored — see `TurnkeyManagedAuthController`'s passkey session handling.
   func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws
 
-  /// Signs a NEW user up with a passkey, creating the sub-organization and — atomically — one
-  /// custom wallet carrying `signupWalletAccounts` (one seed for every chain family). Stores
-  /// the session under the vendor's default key (see `loginWithTurnkeyPasskey`).
-  func signUpWithTurnkeyPasskey(
-    anchor: ASPresentationAnchor,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws
+  /// Runs the platform passkey-registration ceremony for `rpId` and returns what rain-api's
+  /// `/signup/passkey` needs. No account, no session — the controller signs the account up
+  /// through rain-api and then logs in with `loginWithTurnkeyPasskey`.
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration
 
   /// Registers an additional passkey authenticator on the authenticated user. No new account,
   /// no session change — afterwards the passkey signs into THIS account.
@@ -168,6 +165,30 @@ internal protocol TurnkeyContextProtocol: AnyObject {
     address: String,
     encoding: ExportedKeyEncoding
   ) async throws -> String
+}
+
+/// A freshly registered passkey, in the shape rain-api's `/signup/passkey` validates (the
+/// vendor's `v1Attestation` plus the challenge). Module-owned so mocks need not build the
+/// vendor type.
+internal struct PasskeyRegistration: Sendable, Equatable {
+  let challenge: String
+  let credentialId: String
+  let clientDataJson: String
+  let attestationObject: String
+  /// Vendor `v1AuthenticatorTransport` raw values.
+  let transports: [String]
+
+  var apiAttestation: RainApiPasskeyAttestation {
+    RainApiPasskeyAttestation(
+      challenge: challenge,
+      attestation: .init(
+        credentialId: credentialId,
+        clientDataJson: clientDataJson,
+        attestationObject: attestationObject,
+        transports: transports
+      )
+    )
+  }
 }
 
 /// Output encoding for a single exported private key. Module-owned so the protocol (and mocks)
@@ -291,20 +312,20 @@ extension TurnkeyContext: TurnkeyContextProtocol {
     _ = try await loginWithPasskey(anchor: anchor)
   }
 
-  internal func signUpWithTurnkeyPasskey(
-    anchor: ASPresentationAnchor,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws {
-    // Same atomic provisioning as the OTP signup path: the custom wallet is created inside the
-    // signup request. CreateSubOrgParams has no public initializer at swift-sdk 4.0.0 — its
-    // Decodable witness is the only way to construct one from outside the vendor module.
-    var subOrgParams = try JSONDecoder().decode(CreateSubOrgParams.self, from: Data("{}".utf8))
-    subOrgParams.customWallet = v1WalletParams(
-      accounts: signupWalletAccounts,
-      mnemonicLength: 12,
-      walletName: "Wallet"
+  internal func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
+    let passkeyName = "passkey-\(Int(Date().timeIntervalSince1970))"
+    let passkey = try await createPasskey(
+      user: PasskeyUser(id: UUID().uuidString, name: passkeyName, displayName: passkeyName),
+      rp: RelyingParty(id: rpId, name: ""),
+      presentationAnchor: anchor
     )
-    _ = try await signUpWithPasskey(anchor: anchor, createSubOrgParams: subOrgParams)
+    return PasskeyRegistration(
+      challenge: passkey.challenge,
+      credentialId: passkey.attestation.credentialId,
+      clientDataJson: passkey.attestation.clientDataJson,
+      attestationObject: passkey.attestation.attestationObject,
+      transports: passkey.attestation.transports.map(\.rawValue)
+    )
   }
 
   internal func addPasskeyAuthenticator(anchor: ASPresentationAnchor, rpId: String) async throws {

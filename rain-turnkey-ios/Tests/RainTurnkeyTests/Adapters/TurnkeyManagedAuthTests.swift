@@ -609,7 +609,7 @@ struct TurnkeyManagedAuthTests {
     }
 
     #expect(turnkey.loginWithPasskeyCallCount == 0)
-    #expect(turnkey.signUpWithPasskeyCallCount == 0)
+    #expect(turnkey.registerPasskeyCalls.isEmpty, "refused before Face ID")
     #expect(turnkey.clearStoredSessionCalls.isEmpty)
     #expect(turnkey.session != nil)
     #expect(controller.hasActiveSession())
@@ -637,23 +637,97 @@ struct TurnkeyManagedAuthTests {
   }
 
   @MainActor
-  @Test("passkey signup provisions one dual-account wallet atomically")
-  func testPasskeySignupProvisionsAtomically() async throws {
+  @Test("passkey signup: contact-less token, ceremony, /signup/passkey, then the vendor's passkey login")
+  func testPasskeySignupOnRainApi() async throws {
     let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
     turnkey.onPasskeyAuth = {
       turnkey.session = MockTurnkey.defaultSession()
       turnkey.authState = .authenticated
     }
-    let controller = makeController(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
 
-    try await controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
 
-    #expect(turnkey.signUpWithPasskeyCallCount == 1)
-    let accounts = try #require(turnkey.signUpPasskeyAccounts.first)
-    #expect(accounts.map(\.addressFormat) == [.address_format_ethereum, .address_format_solana])
-    // Atomic provisioning at signup — nothing left for the backfill to do.
+    // The token is minted for NO contact — the only token kind /signup/passkey accepts.
+    #expect(h.tokenRequests == [nil])
+    #expect(turnkey.registerPasskeyCalls == ["passkeys.rain.xyz"])
+    #expect(h.api.calls == [.init(endpoint: .signupPasskey, token: "wat-1")])
+    #expect(h.api.passkeyBodies == [turnkey.stubbedRegistration.apiAttestation])
+    // Signup returns no session, so the session comes from the vendor's passkey login (the
+    // second biometric prompt), stored under the vendor's default key and auto-selected.
+    #expect(turnkey.loginWithPasskeyCallCount == 1)
+    #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
+    #expect(turnkey.selectStoredSessionCalls.isEmpty)
+    // rain-api provisioned both accounts — nothing left for the backfill to do.
     #expect(turnkey.createWalletCalls.isEmpty)
     #expect(turnkey.addAccountsCalls.isEmpty)
+    #expect(h.controller.currentAuthState() == .authenticated)
+  }
+
+  @MainActor
+  @Test("passkey signup without a token provider fails before the ceremony")
+  func testPasskeySignupWithoutTokenProvider() async {
+    let turnkey = MockTurnkey(session: nil)
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz", tokenProvider: false)
+
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(turnkey.registerPasskeyCalls.isEmpty, "no Face ID for a flow that cannot complete")
+    #expect(h.api.calls.isEmpty)
+  }
+
+  @MainActor
+  @Test("a /signup/passkey refusal leaves no login attempt and steers a 409 to loginWithPasskey")
+  func testPasskeySignupRefused() async {
+    let turnkey = MockTurnkey(session: nil)
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.api.signupPasskeyError = RainApiAuthError(kind: .conflict, statusCode: 409, message: "Passkey already has a wallet")
+
+    let error = await #expect(throws: RainError.self) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(error?.code == "RAIN_102")
+    #expect(error?.errorDescription?.contains("loginWithPasskey") == true)
+    #expect(turnkey.loginWithPasskeyCallCount == 0)
+    #expect(turnkey.clearStoredSessionCalls.isEmpty)
+
+    h.api.signupPasskeyError = RainApiAuthError(kind: .forbidden, statusCode: 403, message: "Flag off")
+    await #expect(throws: RainError.unauthorized()) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(turnkey.loginWithPasskeyCallCount == 0)
+  }
+
+  @MainActor
+  @Test("a cancelled ceremony surfaces as userRejected and never reaches rain-api")
+  func testPasskeySignupCeremonyCancelled() async {
+    let turnkey = MockTurnkey(session: nil)
+    turnkey.registerPasskeyError = ASAuthorizationError(.canceled)
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+
+    await #expect(throws: RainError.userRejected) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(h.api.calls.isEmpty)
+    #expect(turnkey.loginWithPasskeyCallCount == 0)
+  }
+
+  @MainActor
+  @Test("passkey signup over a live OTP session activates the default key and drops the old one")
+  func testPasskeySignupOverLiveOtpSession() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: MockTurnkey.defaultSession())
+    let previousKey = try #require(turnkey.selectedStoredSessionKey)
+    turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+
+    try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+
+    #expect(turnkey.selectStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey])
+    // Storage-only pre-purge of the stale default key, then the superseded session — the same
+    // dance as passkey login, now around the post-signup login call.
+    #expect(turnkey.clearStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey, previousKey])
+    #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
   }
 
   @MainActor
@@ -673,7 +747,7 @@ struct TurnkeyManagedAuthTests {
       try await controller.addPasskey(anchor: anchor)
     }
     #expect(turnkey.loginWithPasskeyCallCount == 0)
-    #expect(turnkey.signUpWithPasskeyCallCount == 0)
+    #expect(turnkey.registerPasskeyCalls.isEmpty)
     #expect(turnkey.addPasskeyCalls.isEmpty)
   }
 

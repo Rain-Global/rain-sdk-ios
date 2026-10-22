@@ -485,21 +485,42 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     }
   }
 
-  /// Creates a NEW account with a passkey — one wallet with both chain-family accounts is
-  /// provisioned atomically inside the signup. Returning users must use `loginWithPasskey`
-  /// (or a login code): every call here mints a fresh account with an empty wallet.
+  /// Creates a NEW account with a passkey: the platform registration ceremony, then rain-api's
+  /// `/signup/passkey` on a contact-less wallet auth token (rain-api provisions one seed with
+  /// both chain-family accounts), then the vendor's passkey login for the session — two
+  /// biometric prompts, since the signup returns no session (backend ask). Returning users must
+  /// use `loginWithPasskey` (or a login code): every call here mints a fresh account.
+  ///
+  /// Order matters for what a failure leaves behind: the token is minted before the ceremony so
+  /// a host without a backend fails before Face ID; a `/signup/passkey` refusal leaves a
+  /// keychain passkey that no account knows (the user can delete it in Settings) but no
+  /// account; a login failure after a successful signup leaves an account the same passkey can
+  /// sign into with `loginWithPasskey`.
   internal func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try throwIfMisconfigured()
-    try requirePasskeysConfigured()
+    let rpId = try requirePasskeysConfigured()
     try await refuseIfLivePasskeySession()
+    let token = try await mintToken(for: nil)
+    let registration: PasskeyRegistration
+    do {
+      registration = try await context.registerPasskey(anchor: anchor, rpId: rpId)
+    } catch {
+      throw RainError.from(underlying: error)
+    }
+    do {
+      _ = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
+    } catch let error as RainApiAuthError where error.kind == .conflict {
+      throw RainError.invalidConfig(details:
+        "This passkey already belongs to a wallet — sign in with loginWithPasskey instead: \(error.message)")
+    } catch {
+      throw RainError.from(underlying: error)
+    }
     let previousKey = context.selectedStoredSessionKey
     preparePasskeyDefaultKey()
     do {
-      try await context.signUpWithTurnkeyPasskey(
-        anchor: anchor,
-        signupWalletAccounts: [Self.ethereumAccount, Self.solanaAccount]
-      )
+      try await context.loginWithTurnkeyPasskey(anchor: anchor)
     } catch {
+      // The account exists; the passkey signs into it next time via loginWithPasskey.
       throw RainError.from(underlying: error)
     }
     try await activatePasskeySession(previousKey: previousKey)

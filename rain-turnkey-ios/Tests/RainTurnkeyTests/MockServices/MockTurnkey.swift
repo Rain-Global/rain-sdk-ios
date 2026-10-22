@@ -475,10 +475,13 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
 
   var loginWithPasskeyCallCount = 0
   var loginWithPasskeyError: Error?
-  var signUpWithPasskeyCallCount = 0
-  var signUpWithPasskeyError: Error?
-  /// Signup wallet accounts passed to each `signUpWithTurnkeyPasskey` call.
-  var signUpPasskeyAccounts: [[WalletAccountParams]] = []
+  /// rpIds the registration ceremony ran for.
+  var registerPasskeyCalls: [String] = []
+  var registerPasskeyError: Error?
+  var stubbedRegistration = PasskeyRegistration(
+    challenge: "Y2hhbGxlbmdl", credentialId: "cred-1", clientDataJson: "eyJ0eXBlIjoi",
+    attestationObject: "o2NmbXQ", transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
+  )
   /// Runs after a successful passkey login/signup — install the new session / authState here.
   var onPasskeyAuth: (() -> Void)?
 
@@ -491,14 +494,10 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
     try storePasskeySession()
   }
 
-  func signUpWithTurnkeyPasskey(
-    anchor: ASPresentationAnchor,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws {
-    signUpWithPasskeyCallCount += 1
-    signUpPasskeyAccounts.append(signupWalletAccounts)
-    if let signUpWithPasskeyError { throw signUpWithPasskeyError }
-    try storePasskeySession()
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
+    registerPasskeyCalls.append(rpId)
+    if let registerPasskeyError { throw registerPasskeyError }
+    return stubbedRegistration
   }
 
   /// Vendor behaviour at 4.0.0: passkey sessions always store under the DEFAULT key (the

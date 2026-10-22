@@ -52,7 +52,9 @@ Configure expiry/refresh/retry behavior via `RainWalletConfig.sessionPolicy`
 ## Passkeys and login contacts
 
 `signUpWithPasskey(anchor:)` creates a NEW account (fresh wallet — returning users must use
-`loginWithPasskey(anchor:)` or a login code, or they end up with a second, empty account);
+`loginWithPasskey(anchor:)` or a login code, or they end up with a second, empty account). It
+needs a contact-less wallet auth token, so your `authTokenProvider` is called with `nil`; expect
+two biometric prompts — one to register the passkey, one to sign in with it;
 `addPasskey(anchor:)` registers a passkey on the current account so the next login can skip the
 code. Passkeys use YOUR domain: set `RainWalletConfig(passkeyDomain:)` to a web domain you
 control, serve `/.well-known/apple-app-site-association` on it listing your app under

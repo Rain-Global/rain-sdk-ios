@@ -189,8 +189,17 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   verification token. `TurnkeyConfig` managed init requires `authBackend:
   TurnkeyManagedAuthBackend(baseURL:tokenProvider:)` (SPI). `invalidateExisting` is GONE: a
   second device no longer logs the first out (test plan B7 now expects success — backend ask).
-  Passkey SIGNUP still goes through the vendor/proxy until PR H3; `authProxyConfigId` stays
-  until H4. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
+  PR H3 (IN PROGRESS 2026-10-22, branch volo/feature/rain-api-passkey-signup): passkey SIGNUP
+  = `mintToken(for: nil)` (contact-less, BEFORE Face ID so a host without a backend fails
+  first) → `context.registerPasskey(anchor:rpId:)` (the platform ceremony alone, returns
+  module-owned `PasskeyRegistration` = challenge + v1Attestation fields, transports as raw
+  values) → `/signup/passkey` (409 → invalidConfig steering to loginWithPasskey; other
+  refusals mapped) → vendor `loginWithTurnkeyPasskey` for the session (SECOND biometric
+  prompt; signup returns no session — backend ask) inside the same prepare/activate/purge
+  dance as login. `signUpWithTurnkeyPasskey` (vendor proxy signup + customWallet) is GONE;
+  `addPasskeyAuthenticator` unchanged. Failure residue: a refused signup leaves a keychain
+  passkey no account knows; a failed post-signup login leaves an account the passkey can
+  `loginWithPasskey` into. `authProxyConfigId` stays until H4. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
   comment) feeds `prepareRainWallet`'s provider. Host surface: `RainWalletConfig`
   gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz) / .custom(URL)`
   (DEFAULT .production) and `authTokenProvider: (RainWalletContact?) async throws -> String`
