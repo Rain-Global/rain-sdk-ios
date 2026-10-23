@@ -30,7 +30,8 @@ struct RainWalletTests {
       config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth", authBackend: backend, rpId: rpId),
       context: stub,
       managedAuth: TurnkeyManagedAuthController(
-        context: stub, configurationError: nil, rpId: rpId, api: api, tokenProvider: backend.tokenProvider
+        context: stub, configurationError: nil, rpId: rpId, api: api, tokenProvider: backend.tokenProvider,
+        pendingPasskeySignups: StubPendingPasskeySignupStore()
       )
     )
   }

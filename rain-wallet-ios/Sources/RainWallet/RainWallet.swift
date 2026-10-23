@@ -391,6 +391,8 @@ public struct RainProvider: ProviderDescriptor {
   /// Creates a NEW account with a passkey; one wallet with EVM + Solana accounts is provisioned
   /// atomically. Every call mints a fresh account — returning users must use
   /// ``loginWithPasskey(anchor:)`` (or a login code), or they end up with a second, empty wallet.
+  /// Asks ``RainWalletConfig/authTokenProvider`` for a contact-less token (`nil` contact) and
+  /// shows two biometric prompts: registration, then sign-in.
   public func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try requireOpen()
     try await backing.signUpWithPasskey(anchor: anchor)

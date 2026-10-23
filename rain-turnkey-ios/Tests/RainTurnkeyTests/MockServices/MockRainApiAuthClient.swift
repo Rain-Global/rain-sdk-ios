@@ -35,6 +35,9 @@ final class MockRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
   var signupError: Error?
   var loginError: Error?
   var signupPasskeyError: Error?
+  /// Errors thrown by successive `signupPasskey` calls, consumed in order; `signupPasskeyError`
+  /// applies once the queue is empty.
+  var signupPasskeyErrors: [Error] = []
   /// Tokens rain-api treats as expired/revoked (401) on any call.
   var rejectedTokens: Set<String> = []
 
@@ -88,7 +91,18 @@ final class MockRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
   func signupPasskey(token: String, attestation: RainApiPasskeyAttestation) async throws -> RainApiSignup {
     try record(.signupPasskey, token)
     passkeyBodies.append(attestation)
+    if !signupPasskeyErrors.isEmpty { throw signupPasskeyErrors.removeFirst() }
     if let signupPasskeyError { throw signupPasskeyError }
     return RainApiSignup(subOrganizationId: nextSubOrganizationId)
   }
+}
+
+/// In-memory stand-in for the persisted pending-signup store.
+final class InMemoryPendingPasskeySignupStore: PendingPasskeySignupStore, @unchecked Sendable {
+  var registration: PasskeyRegistration?
+  var saveCount = 0
+  var clearCount = 0
+  func load() -> PasskeyRegistration? { registration }
+  func save(_ registration: PasskeyRegistration) { self.registration = registration; saveCount += 1 }
+  func clear() { registration = nil; clearCount += 1 }
 }

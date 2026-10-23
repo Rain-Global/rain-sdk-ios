@@ -68,18 +68,18 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
   ) async throws {}
 
   var loginWithPasskeyCallCount = 0
-  var signUpWithPasskeyCallCount = 0
+  var registerPasskeyCalls: [String] = []
   var addPasskeyCalls: [String] = []
 
   func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws {
     loginWithPasskeyCallCount += 1
   }
 
-  func signUpWithTurnkeyPasskey(
-    anchor: ASPresentationAnchor,
-    signupWalletAccounts: [WalletAccountParams]
-  ) async throws {
-    signUpWithPasskeyCallCount += 1
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
+    registerPasskeyCalls.append(rpId)
+    return PasskeyRegistration(
+      challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao", transports: []
+    )
   }
 
   func addPasskeyAuthenticator(anchor: ASPresentationAnchor, rpId: String) async throws {
@@ -147,4 +147,11 @@ final class StubRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
     tokens.append(token)
     return RainApiSignup(subOrganizationId: "sub")
   }
+}
+
+final class StubPendingPasskeySignupStore: PendingPasskeySignupStore, @unchecked Sendable {
+  var registration: PasskeyRegistration?
+  func load() -> PasskeyRegistration? { registration }
+  func save(_ registration: PasskeyRegistration) { self.registration = registration }
+  func clear() { registration = nil }
 }
