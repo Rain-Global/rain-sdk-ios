@@ -563,9 +563,10 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     do {
       do {
         _ = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
-      } catch let error as RainApiAuthError where error.kind == .tokenRejected {
+      } catch let error as RainApiAuthError where error.kind == .tokenRejected || Self.isTokenUsed(error) {
         // The user has already done Face ID; giving up would leave a passkey no account knows
-        // and make the next try mint a look-alike. Same one-renewal rule as the code flow.
+        // and make the next try mint a look-alike. Same one-renewal rule as the code flow. A
+        // 409 "token already used" (a host that cached its token) is the same situation.
         let renewed = try await mintToken(for: nil)
         _ = try await api.signupPasskey(token: renewed, attestation: registration.apiAttestation)
       }
@@ -597,16 +598,24 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
 
   private enum PasskeySignupEnding { case accountExists, inProgress, refused, unknown }
 
-  /// rain-api carries no machine code, so its 409s are told apart by message: "signup in
-  /// progress" (a 120 s lock after a failed create — retry shortly, keep the registration),
-  /// "already has a wallet" (on a RESEND, the earlier try worked), anything else a refusal.
-  /// 5xx and rate limits leave the outcome unknown; the rest is definitive.
+  /// 409 "This wallet auth token has already been used": nothing was created, a fresh token
+  /// works. Must not read as "already has a wallet" — both messages contain "wallet".
+  private static func isTokenUsed(_ error: RainApiAuthError) -> Bool {
+    error.kind == .conflict && error.message.lowercased().contains("token has already been used")
+  }
+
+  /// rain-api carries no machine code, so its three 409s are told apart by message — full
+  /// phrases, since two of them contain "wallet": "signup in progress" (a 120 s lock after a
+  /// failed create — retry shortly, keep the registration), "already has a wallet" (on a
+  /// RESEND, the earlier try worked), "token has already been used" (handled as a renewal
+  /// before reaching here); anything else a refusal. 5xx and rate limits leave the outcome
+  /// unknown; the rest is definitive.
   private static func passkeySignupEnding(_ error: RainApiAuthError, resuming: Bool) -> PasskeySignupEnding {
     let message = error.message.lowercased()
     switch error.kind {
-    case .conflict where message.contains("progress"):
+    case .conflict where message.contains("in progress"):
       return .inProgress
-    case .conflict where resuming && message.contains("wallet"):
+    case .conflict where resuming && message.contains("already has a wallet"):
       return .accountExists
     case .conflict:
       return .refused

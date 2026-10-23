@@ -749,6 +749,27 @@ struct TurnkeyManagedAuthTests {
   }
 
   @MainActor
+  @Test("a 409 'token has already been used' on a resend is a renewal, not 'the first try worked'")
+  func testResendWithUsedTokenRenews() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
+    let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.pendingSignups.registration = turnkey.stubbedRegistration
+    // First answer: the cached token was spent. Second (fresh token): success.
+    h.api.signupPasskeyErrors = [
+      RainApiAuthError(kind: .conflict, statusCode: 409, message: "This wallet auth token has already been used"),
+    ]
+
+    try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+
+    #expect(h.api.calls.map(\.token) == ["wat-1", "wat-2"])
+    #expect(h.api.passkeyBodies.count == 2, "the same registration resent on the fresh token")
+    #expect(turnkey.registerPasskeyCalls.isEmpty)
+    #expect(h.pendingSignups.registration == nil)
+    #expect(turnkey.loginWithPasskeyCallCount == 1)
+  }
+
+  @MainActor
   @Test("a resend answered 'signup in progress' keeps the registration and asks the host to retry shortly")
   func testResendDuringBackendLock() async throws {
     let turnkey = MockTurnkey(session: nil)
