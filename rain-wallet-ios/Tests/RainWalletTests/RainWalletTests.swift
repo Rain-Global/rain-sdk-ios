@@ -13,7 +13,7 @@ struct RainWalletTests {
   /// vendor singleton (which traps when unconfigured in a test host) — stub both seams so unit
   /// tests never touch real keychain/session machinery.
   init() {
-    TurnkeyManagedConfigurator.configureImpl = { _, _, _ in }
+    TurnkeyManagedConfigurator.configureImpl = { _, _ in }
     TurnkeyManagedConfigurator.sharedContext = { StubBackendContext() }
   }
 
@@ -27,7 +27,7 @@ struct RainWalletTests {
     _ stub: StubBackendContext, rpId: String? = nil, api: StubRainApiAuthClient = StubRainApiAuthClient()
   ) -> TurnkeyProvider {
     TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "auth", authBackend: backend, rpId: rpId),
+      config: TurnkeyConfig(organizationId: "org", authBackend: backend, rpId: rpId),
       context: stub,
       managedAuth: TurnkeyManagedAuthController(
         context: stub, configurationError: nil, rpId: rpId, api: api, tokenProvider: backend.tokenProvider,

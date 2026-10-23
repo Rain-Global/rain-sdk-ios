@@ -1099,7 +1099,7 @@ struct TurnkeyManagedAuthTests {
   @Test("auth methods on a BYO-mode provider throw invalidConfig")
   func testByoModeGuard() async {
     let provider = TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy", authBackend: Self.testBackend),
+      config: TurnkeyConfig(organizationId: "org", authBackend: Self.testBackend),
       context: MockTurnkey(session: nil),
       managedAuth: nil // what a BYO construction yields
     )
@@ -1124,7 +1124,7 @@ struct TurnkeyManagedAuthTests {
     let api = MockRainApiAuthClient()
     api.walletsByContact["user@example.com"] = "sub-1"
     let provider = TurnkeyProvider(
-      config: TurnkeyConfig(organizationId: "org", authProxyConfigId: "proxy", authBackend: Self.testBackend),
+      config: TurnkeyConfig(organizationId: "org", authBackend: Self.testBackend),
       context: turnkey,
       managedAuth: TurnkeyManagedAuthController(
         context: turnkey, configurationError: nil, api: api, tokenProvider: Self.testBackend.tokenProvider,
@@ -1149,11 +1149,12 @@ struct TurnkeyManagedAuthTests {
     let previousImpl = TurnkeyManagedConfigurator.configureImpl
     defer { TurnkeyManagedConfigurator.configureImpl = previousImpl }
     nonisolated(unsafe) var configureCalls = 0
-    TurnkeyManagedConfigurator.configureImpl = { _, _, _ in configureCalls += 1 }
+    TurnkeyManagedConfigurator.configureImpl = { _, _ in configureCalls += 1 }
 
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, authProxyConfigId: "p", rpId: nil) == nil)
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, authProxyConfigId: "p", rpId: nil) == nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil) == nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil) == nil)
     #expect(configureCalls == 1)
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: "other", authProxyConfigId: "p", rpId: nil) != nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: "other", rpId: nil) != nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: "other.example") != nil)
   }
 }

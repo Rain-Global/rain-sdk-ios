@@ -61,9 +61,12 @@ import per provider suffices. The 1.x `RainSDK` umbrella module has been REMOVED
   coordinator/policy (`onSessionExpired`), error mapping registered via
   `RainError.registerErrorMapper` from the provider's init. Portal/Privy: auth happens OUTSIDE
   Rain (host hands in an authenticated vendor object). Turnkey has two modes: BYO (same), and
-  MANAGED — `TurnkeyConfig(organizationId:authProxyConfigId:)`, SDK configures the TurnkeyContext
-  singleton (one-shot per process, TurnkeyManagedConfigurator) and TurnkeyProvider exposes email-OTP
-  auth (sendLoginCode/confirmLoginCode/logout/authState) + EVM/Solana wallet provisioning on login.
+  MANAGED — `TurnkeyConfig(organizationId:authBackend:)` (NO auth-proxy id since PR H4: the
+  vendor's `client` is nil until a session exists, which every SDK call already guards for;
+  passkey login builds its own client), SDK configures the TurnkeyContext singleton (one-shot per
+  process, TurnkeyManagedConfigurator keyed on org id + rpId) and TurnkeyProvider exposes auth
+  (sendLoginCode/confirmLoginCode/passkeys/logout/authState) over rain-api + EVM/Solana wallet
+  provisioning on login.
 - SPI convention: adapter modules reach core internals via `@_spi(RainAdapter) import RainCore`
   (`ChainReader`/`MinedReceipt`, `ProviderContext.evmChainReader`, `RainSolanaSupport` seams,
   `SolanaRpcClient`, `SolanaTransferComposer`, `JsonRpcClient`, `SolanaTransactionDecoder`,
@@ -87,7 +90,7 @@ descriptor struct). No typealiases at all: both renames are clean breaks in the 
 Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and RainWallet:
 
 - PR B1 (DONE 2026-09-07; reworked 2026-09-09), RainTurnkey managed auth — SPI-only: `TurnkeyConfig`
-  gains a managed init (`organizationId` + `authProxyConfigId`) alongside the existing BYO
+  gains a managed init (`organizationId` + `authProxyConfigId`; the proxy id REMOVED in H4) alongside the existing BYO
   authenticated-context init (kept, non-breaking). Managed mode: the SDK calls
   `TurnkeyContext.configure` itself (singleton, process-guarded) and `TurnkeyProvider` exposes
   auth — email OTP only: `sendLoginCode(email:)` / `confirmLoginCode(_:)` (ORIGINALLY vendor
@@ -105,9 +108,8 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   (TurnkeyAuthSample drives the vendor SDK); managed email-OTP is demoed on the Rain Wallet tab.
 - PR B2 (DONE 2026-09-07; ids embedded 2026-09-11), `rain-wallet-ios` / `RainWallet`: renaming
   layer over managed RainTurnkey. DECISION 2026-09-11 (reverses the earlier host-supplied
-  design): Rain's org id + auth config id are EMBEDDED in the module
-  (`RainWalletBackend.organizationId` / `.authConfigId` — public identifiers, not secrets;
-  abuse bounded by OTP rate limits). `RainWalletConfig(walletAddress:sessionPolicy:onSessionExpired:)`
+  design): Rain's org id is EMBEDDED in the module (`RainWalletBackend.organizationId` —
+  a public identifier, not a secret; `.authConfigId` was DELETED in PR H4 with the Auth Proxy). `RainWalletConfig(walletAddress:sessionPolicy:onSessionExpired:)`
   carries behavior only, and `RainProvider()` is zero-config (defaulted init). Descriptor struct
   `RainProvider`, id `ProviderId.rain`, neutral session surface (`RainWalletSessionState`,
   publisher, refreshSession). RainWallet @_exported imports RainCore only — NEVER RainTurnkey
@@ -159,8 +161,9 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   runs no shared passkey domain, and passkeys are per-partner (not portable across partner apps;
   the same account can hold passkeys from several domains). rpId still joins the one-shot vendor
   configure and is one-shot per launch. SMS is Turnkey-Enterprise
-  (FEATURE_NAME_SMS_AUTH on Rain's org + allowed on the auth-proxy config; sandbox:
-  +1 999-999-9999 / 000000 with alphanumeric=false, otpLength=6). Accounts NEVER merge
+  (FEATURE_NAME_SMS_AUTH on Rain's org; since PR H2 the code is sent by rain-api from the
+  PARENT org — sandbox +1 999-999-9999 / 000000 needs alphanumeric=false, otpLength=6 on
+  rain-api's init, guide open question #5b). Accounts NEVER merge
   (sub-org = account boundary): docs steer returning users to login/add-passkey, not signup;
   OPEN QUESTION to test + confirm with Turnkey: attaching a contact already owned by another
   sub-org (rejected, or ambiguous for contact-based login lookup?). Demo: email/phone toggle on
@@ -208,7 +211,14 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   `providerError(TurnkeyPasskeySignupInProgress)`, keep; definitive refusals clear. Token
   rejected at /signup/passkey → ONE renewal (same rule as codes). Failure residue: a refused
   signup leaves a keychain passkey no account knows; a failed post-signup login leaves an
-  account the passkey can `loginWithPasskey` into. `authProxyConfigId` stays until H4. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
+  account the passkey can `loginWithPasskey` into.
+  PR H4 (DONE 2026-10-23, branch volo/refactor/drop-auth-proxy-config): `authProxyConfigId`
+  REMOVED everywhere managed — `RainWalletBackend.authConfigId`, the `Mode.managed` field, the
+  managed init, `TurnkeyManagedConfigurator.configure(organizationId:rpId:)` (configureImpl is
+  `(String, String?)`, the vendor config gets `authProxyConfigId: nil`). VENDOR FACT (verified
+  2026-10-23): `TurnkeyContext.client` is nil without the proxy id UNTIL a session exists
+  (+Session.swift sets it); passkey login builds its own passkey-stamped client and `stampLogin`s
+  directly. The demo's BYO Turnkey tab still uses the proxy — the HOST's choice, untouched. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
   comment) feeds `prepareRainWallet`'s provider. Host surface: `RainWalletConfig`
   gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz) / .custom(URL)`
   (DEFAULT .production) and `authTokenProvider: (RainWalletContact?) async throws -> String`
@@ -230,7 +240,7 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   matching private key and `sign(payload:format: .raw)`; `storeSession(jwt:sessionKey:)`.
   rain-api's clientSignature JSON = vendor `v1ClientSignature` shape (`publicKey, scheme:
   "CLIENT_SIGNATURE_SCHEME_API_P256", message, signature`). `TurnkeyContext.configure` keeps
-  organizationId + rpId; `authProxyConfigId` goes in PR H4. Backend asks outstanding: /login
+  organizationId + rpId only (H4). Backend asks outstanding: /login
   doesn't revoke other sessions (we rely on invalidateExisting today → B7); passkey signup
   returns no session (two biometric prompts); attaching an already-walleted contact → next
   login 500; errors carry no machine code (string matching); 429 has no RAIN code (propose

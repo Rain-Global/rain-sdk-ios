@@ -36,7 +36,7 @@ public enum TurnkeyLoginContact: Sendable, Equatable {
   /// Email OTP.
   case email(String)
   /// SMS OTP. Requires SMS auth to be enabled on the wallet backend (Turnkey Enterprise
-  /// feature + auth-proxy configuration).
+  /// feature on Rain's organization).
   case phone(String)
 
   internal var contact: String {
@@ -142,15 +142,19 @@ public enum TurnkeyKeyFamily: Sendable, Equatable {
 /// caller must surface (the app has to relaunch to change them).
 internal enum TurnkeyManagedConfigurator {
   nonisolated(unsafe) private static var configuredWith:
-    (organizationId: String, authProxyConfigId: String, rpId: String?)?
+    (organizationId: String, rpId: String?)?
   private static let lock = NSLock()
 
   /// Test seam: replaces the actual vendor configure call.
-  nonisolated(unsafe) internal static var configureImpl: @Sendable (String, String, String?) -> Void = { organizationId, authProxyConfigId, rpId in
+  nonisolated(unsafe) internal static var configureImpl: @Sendable (String, String?) -> Void = { organizationId, rpId in
+    // No auth-proxy configuration: code login, signup and contact attach run against rain-api,
+    // and passkey login builds its own passkey-stamped client. Without the proxy id the
+    // vendor's `client` is nil until a session exists — every call the SDK makes already runs
+    // behind the session guard, so nothing observes that.
     TurnkeyContext.configure(
       TurnkeySwift.TurnkeyConfig(
         organizationId: organizationId,
-        authProxyConfigId: authProxyConfigId,
+        authProxyConfigId: nil,
         rpId: rpId
       )
     )
@@ -167,20 +171,19 @@ internal enum TurnkeyManagedConfigurator {
   /// `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
   internal static func configure(
     organizationId: String,
-    authProxyConfigId: String,
     rpId: String?
   ) -> RainError? {
     lock.lock(); defer { lock.unlock() }
     if let configuredWith {
-      guard configuredWith == (organizationId, authProxyConfigId, rpId) else {
+      guard configuredWith == (organizationId, rpId) else {
         return .invalidConfig(details:
           "The wallet backend is already configured with different ids for this app launch; "
           + "relaunch the app to change them")
       }
       return nil
     }
-    configureImpl(organizationId, authProxyConfigId, rpId)
-    configuredWith = (organizationId, authProxyConfigId, rpId)
+    configureImpl(organizationId, rpId)
+    configuredWith = (organizationId, rpId)
     return nil
   }
 }
