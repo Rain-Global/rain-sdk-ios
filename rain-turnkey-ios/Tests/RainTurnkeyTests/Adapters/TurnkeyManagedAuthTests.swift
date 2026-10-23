@@ -1142,19 +1142,23 @@ struct TurnkeyManagedAuthTests {
 
   // MARK: - Process-wide configurator
 
-  @Test("configure is idempotent for identical ids and errors on different ids")
+  @Test("configure is idempotent for identical values and errors when the org, passkey domain or environment differs")
   func testConfigurator() {
     // Unique ids per run: the configurator is process-global state.
     let organizationId = "org-\(UUID().uuidString)"
+    let sandbox = URL(string: "https://api-dev.rain.xyz")!
+    let production = URL(string: "https://api.rain.xyz")!
     let previousImpl = TurnkeyManagedConfigurator.configureImpl
     defer { TurnkeyManagedConfigurator.configureImpl = previousImpl }
     nonisolated(unsafe) var configureCalls = 0
     TurnkeyManagedConfigurator.configureImpl = { _, _ in configureCalls += 1 }
 
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil) == nil)
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil) == nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil, authBaseURL: sandbox) == nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil, authBaseURL: sandbox) == nil)
     #expect(configureCalls == 1)
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: "other", rpId: nil) != nil)
-    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: "other.example") != nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: "other", rpId: nil, authBaseURL: sandbox) != nil)
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: "other.example", authBaseURL: sandbox) != nil)
+    // Two environments in one launch would share the vendor's single session store.
+    #expect(TurnkeyManagedConfigurator.configure(organizationId: organizationId, rpId: nil, authBaseURL: production) != nil)
   }
 }

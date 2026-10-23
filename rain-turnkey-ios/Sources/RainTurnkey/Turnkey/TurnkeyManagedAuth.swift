@@ -140,9 +140,13 @@ public enum TurnkeyKeyFamily: Sendable, Equatable {
 /// Guards `TurnkeyContext.configure(...)`, which is one-shot for the process lifetime.
 /// Configuring again with the same values is a no-op; with different values it is an error the
 /// caller must surface (the app has to relaunch to change them).
+///
+/// The rain-api base URL joins the key even though the vendor never sees it: two providers for
+/// different environments would share the one vendor session store, so a sandbox login could be
+/// picked up by a production provider. Android keys the same guard on all three.
 internal enum TurnkeyManagedConfigurator {
   nonisolated(unsafe) private static var configuredWith:
-    (organizationId: String, rpId: String?)?
+    (organizationId: String, rpId: String?, authBaseURL: URL)?
   private static let lock = NSLock()
 
   /// Test seam: replaces the actual vendor configure call.
@@ -167,23 +171,25 @@ internal enum TurnkeyManagedConfigurator {
   }
 
   /// Configures the Turnkey singleton once per process. Returns the error to surface on every
-  /// subsequent call when the ids differ from the ones the process was configured with.
-  /// `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
+  /// subsequent call when the values differ from the ones the process was configured with.
+  /// `rpId` is the passkey relying-party domain; `nil` disables passkey flows. `authBaseURL` is
+  /// the rain-api environment the provider authenticates against.
   internal static func configure(
     organizationId: String,
-    rpId: String?
+    rpId: String?,
+    authBaseURL: URL
   ) -> RainError? {
     lock.lock(); defer { lock.unlock() }
     if let configuredWith {
-      guard configuredWith == (organizationId, rpId) else {
+      guard configuredWith == (organizationId, rpId, authBaseURL) else {
         return .invalidConfig(details:
-          "The wallet backend is already configured with different ids for this app launch; "
-          + "relaunch the app to change them")
+          "The wallet backend is already configured for this app launch with a different "
+          + "passkey domain or environment; relaunch the app to change them")
       }
       return nil
     }
     configureImpl(organizationId, rpId)
-    configuredWith = (organizationId, rpId)
+    configuredWith = (organizationId, rpId, authBaseURL)
     return nil
   }
 }
@@ -195,7 +201,7 @@ internal enum TurnkeyManagedConfigurator {
 /// mapped to `RainError` before they surface.
 internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   private let context: TurnkeyContextProtocol
-  /// Set when the process was already configured with different ids; every call fails with it.
+  /// Set when the process was already configured with different values; every call fails with it.
   private let configurationError: RainError?
   /// rain-api's device endpoints.
   private let api: any RainApiAuthClientProtocol

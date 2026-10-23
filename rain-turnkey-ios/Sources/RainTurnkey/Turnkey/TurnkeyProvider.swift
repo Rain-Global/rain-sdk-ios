@@ -153,7 +153,8 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
       // One-shot per process; a mismatch is remembered and thrown from every auth call.
       let configurationError = TurnkeyManagedConfigurator.configure(
         organizationId: organizationId,
-        rpId: rpId
+        rpId: rpId,
+        authBaseURL: authBackend.baseURL
       )
       let shared = TurnkeyManagedConfigurator.sharedContext()
       context = shared

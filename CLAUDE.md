@@ -64,7 +64,7 @@ import per provider suffices. The 1.x `RainSDK` umbrella module has been REMOVED
   MANAGED — `TurnkeyConfig(organizationId:authBackend:)` (NO auth-proxy id since PR H4: the
   vendor's `client` is nil until a session exists, which every SDK call already guards for;
   passkey login builds its own client), SDK configures the TurnkeyContext singleton (one-shot per
-  process, TurnkeyManagedConfigurator keyed on org id + rpId) and TurnkeyProvider exposes auth
+  process, TurnkeyManagedConfigurator keyed on org id + rpId + rain-api base URL) and TurnkeyProvider exposes auth
   (sendLoginCode/confirmLoginCode/passkeys/logout/authState) over rain-api + EVM/Solana wallet
   provisioning on login.
 - SPI convention: adapter modules reach core internals via `@_spi(RainAdapter) import RainCore`
@@ -214,8 +214,10 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   account the passkey can `loginWithPasskey` into.
   PR H4 (DONE 2026-10-23, branch volo/refactor/drop-auth-proxy-config): `authProxyConfigId`
   REMOVED everywhere managed — `RainWalletBackend.authConfigId`, the `Mode.managed` field, the
-  managed init, `TurnkeyManagedConfigurator.configure(organizationId:rpId:)` (configureImpl is
-  `(String, String?)`, the vendor config gets `authProxyConfigId: nil`). VENDOR FACT (verified
+  managed init, `TurnkeyManagedConfigurator.configure(organizationId:rpId:authBaseURL:)`
+  (configureImpl is `(String, String?)`, the vendor config gets `authProxyConfigId: nil`; the
+  one-shot guard is keyed on org id + rpId + rain-api base URL — review: two environments in one
+  launch would share the vendor's single session store; same key as Android). VENDOR FACT (verified
   2026-10-23): `TurnkeyContext.client` is nil without the proxy id UNTIL a session exists
   (+Session.swift sets it); passkey login builds its own passkey-stamped client and `stampLogin`s
   directly. The demo's BYO Turnkey tab still uses the proxy — the HOST's choice, untouched. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
