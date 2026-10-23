@@ -27,7 +27,7 @@ public struct TurnkeyConfig: @unchecked Sendable {
     /// signup. `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
     case managed(
       organizationId: String,
-      authProxyConfigId: String,
+      authProxyConfigId: String?,
       rpId: String?,
       authBackend: TurnkeyManagedAuthBackend
     )
@@ -93,7 +93,7 @@ public struct TurnkeyConfig: @unchecked Sendable {
   @_spi(RainWallet)
   public init(
     organizationId: String,
-    authProxyConfigId: String,
+    authProxyConfigId: String?,
     authBackend: TurnkeyManagedAuthBackend,
     rpId: String? = nil,
     walletAddress: String? = nil,
@@ -165,7 +165,8 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
         configurationError: configurationError,
         rpId: rpId,
         api: RainApiAuthClient(baseURL: authBackend.baseURL),
-        tokenProvider: authBackend.tokenProvider
+        tokenProvider: authBackend.tokenProvider,
+        pendingPasskeySignups: UserDefaultsPendingPasskeySignupStore(organizationId: organizationId)
       )
     }
 

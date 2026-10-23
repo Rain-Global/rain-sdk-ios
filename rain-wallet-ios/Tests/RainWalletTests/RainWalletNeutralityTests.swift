@@ -28,7 +28,6 @@ struct RainWalletNeutralityTests {
         onSessionExpired: {}
       )
     )
-    let _: RainWalletEnvironment = .custom(URL(string: "https://staging.example")!)
     let _: RainProvider = RainProvider() // zero-config: passkey login only, production
 
     // Auth + session surface, fully typed with module-owned names.

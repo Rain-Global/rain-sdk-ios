@@ -26,27 +26,32 @@ internal protocol PendingPasskeySignupStore: Sendable {
 /// public material by design (it is what the server receives) — plus the challenge; nothing
 /// secret, so defaults are an appropriate home.
 ///
+/// Keyed by organization: a registration made under one backend organization must never be
+/// resent to another.
+///
 /// `@unchecked Sendable`: `UserDefaults` is documented thread-safe but not marked `Sendable`.
 internal struct UserDefaultsPendingPasskeySignupStore: PendingPasskeySignupStore, @unchecked Sendable {
-  static let key = "com.rain.sdk.rainwallet.pendingPasskeySignup"
+  static let keyPrefix = "com.rain.sdk.rainwallet.pendingPasskeySignup"
 
   private let defaults: UserDefaults
+  private let key: String
 
-  init(defaults: UserDefaults = .standard) {
+  init(organizationId: String, defaults: UserDefaults = .standard) {
     self.defaults = defaults
+    self.key = "\(Self.keyPrefix).\(organizationId)"
   }
 
   func load() -> PasskeyRegistration? {
-    guard let data = defaults.data(forKey: Self.key) else { return nil }
+    guard let data = defaults.data(forKey: key) else { return nil }
     return try? JSONDecoder().decode(PasskeyRegistration.self, from: data)
   }
 
   func save(_ registration: PasskeyRegistration) {
     guard let data = try? JSONEncoder().encode(registration) else { return }
-    defaults.set(data, forKey: Self.key)
+    defaults.set(data, forKey: key)
   }
 
   func clear() {
-    defaults.removeObject(forKey: Self.key)
+    defaults.removeObject(forKey: key)
   }
 }

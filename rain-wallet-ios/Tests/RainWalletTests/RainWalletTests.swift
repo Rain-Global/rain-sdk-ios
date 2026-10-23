@@ -89,10 +89,17 @@ struct RainWalletTests {
 
   @Test("the environment maps to Rain's hosts, production by default")
   func testEnvironmentWiring() {
+    #expect(RainWalletConfig().environment == .production)
     #expect(RainProvider(RainWalletConfig()).backing.managedAuthBackend?.baseURL.absoluteString == "https://api.rain.xyz")
     #expect(RainProvider(RainWalletConfig(environment: .sandbox)).backing.managedAuthBackend?.baseURL.absoluteString == "https://api-dev.rain.xyz")
-    let staging = URL(string: "https://staging.example/api")!
-    #expect(RainProvider(RainWalletConfig(environment: .custom(staging))).backing.managedAuthBackend?.baseURL == staging)
+  }
+
+  @Test("each environment carries its own backend organization")
+  func testEnvironmentBackendIdentity() {
+    #expect(RainWalletEnvironment.sandbox.organizationId == "63495e45-8e64-42b5-b602-c68f019ca806")
+    #expect(RainWalletEnvironment.sandbox.authProxyConfigId == "1d8aac5e-f236-4800-bab7-98a9e27b4b2a")
+    #expect(RainWalletEnvironment.production.organizationId == "306c2e82-5ae2-4be6-8b41-1ab0cc6b0ab5")
+    #expect(RainWalletEnvironment.production.authProxyConfigId == nil)
   }
 
   @Test("the token provider is handed to the backend with the contact translated, nil stays nil")

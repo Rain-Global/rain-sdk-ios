@@ -142,11 +142,11 @@ public enum TurnkeyKeyFamily: Sendable, Equatable {
 /// caller must surface (the app has to relaunch to change them).
 internal enum TurnkeyManagedConfigurator {
   nonisolated(unsafe) private static var configuredWith:
-    (organizationId: String, authProxyConfigId: String, rpId: String?)?
+    (organizationId: String, authProxyConfigId: String?, rpId: String?)?
   private static let lock = NSLock()
 
   /// Test seam: replaces the actual vendor configure call.
-  nonisolated(unsafe) internal static var configureImpl: @Sendable (String, String, String?) -> Void = { organizationId, authProxyConfigId, rpId in
+  nonisolated(unsafe) internal static var configureImpl: @Sendable (String, String?, String?) -> Void = { organizationId, authProxyConfigId, rpId in
     TurnkeyContext.configure(
       TurnkeySwift.TurnkeyConfig(
         organizationId: organizationId,
@@ -167,7 +167,7 @@ internal enum TurnkeyManagedConfigurator {
   /// `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
   internal static func configure(
     organizationId: String,
-    authProxyConfigId: String,
+    authProxyConfigId: String?,
     rpId: String?
   ) -> RainError? {
     lock.lock(); defer { lock.unlock() }
@@ -251,7 +251,7 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     rpId: String? = nil,
     api: any RainApiAuthClientProtocol,
     tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?,
-    pendingPasskeySignups: any PendingPasskeySignupStore = UserDefaultsPendingPasskeySignupStore()
+    pendingPasskeySignups: any PendingPasskeySignupStore
   ) {
     self.context = context
     self.configurationError = configurationError

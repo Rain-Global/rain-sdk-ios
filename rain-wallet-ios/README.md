@@ -2,7 +2,9 @@
 
 The Rain-branded wallet provider for the modular Rain iOS SDK.
 
-The wallet backend identity is embedded in the SDK. The SDK owns the whole wallet lifecycle:
+The wallet backend identity is embedded in the SDK, one per environment: `.sandbox`
+(`api-dev.rain.xyz`) and `.production` (`api.rain.xyz`) each fix both the Rain API host and the
+wallet organization, so accounts never cross between them. The SDK owns the whole wallet lifecycle:
 authentication (one-time codes over email or SMS, and passkeys), wallet provisioning (EVM +
 Solana on first login), session management, and the full `RainClient` surface. Linking
 `rain-wallet-ios` is all an app needs: `RainCore` comes transitively (and is re-exported, so
@@ -95,7 +97,8 @@ Notes:
 - Errors: a wrong code is `invalidLoginCode` (RAIN_203, retype); a rejected or expired token is
   renewed from your provider once, then `unauthorized` (RAIN_202); a tenant that cannot use
   embedded wallets is `unauthorized` too; rate limits and backend outages are `providerError`.
-- The wallet-backend configuration is one-shot per app launch.
+- The wallet-backend configuration is one-shot per app launch: a second provider with a different
+  environment in the same launch throws `invalidConfig` from every auth call.
 - The Rain wallet provider cannot be registered alongside the Turnkey provider in one app
   (`RainSdk.build()` rejects the combination); they share one process-wide wallet backend.
 - Multi-chain: the same provider serves EVM chains and Solana clusters
