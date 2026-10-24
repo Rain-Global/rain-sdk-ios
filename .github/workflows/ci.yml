@@ -99,6 +99,25 @@ jobs:
             -disableAutomaticPackageResolution \
             2>&1 | tee build/test.log | xcbeautify --renderer github-actions
 
+      # A test-host crash shows up in xcbeautify's output only as a missing "Test run ... passed"
+      # line and a later 'Selected tests' relaunch — every visible test green, exit 65. The raw
+      # log names the test that was running; print that context and keep the result bundle.
+      - name: Show crash context
+        if: failure()
+        run: |
+          grep -nE "Restarting after unexpected exit|crashed|Fatal error|Test Case .* failed|error:" \
+            build/test.log | head -50 || echo "no crash markers in test.log"
+
+      - name: Upload test log and result bundle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            build/test.log
+            build/DerivedData/Logs/Test/*.xcresult
+          if-no-files-found: ignore
+
       # Swift Testing reports per-target "Test run with N tests" lines; xcodebuild's own
       # "Executed N tests" counter only covers XCTest and reads 0 here.
       - name: Summarize Swift Testing results

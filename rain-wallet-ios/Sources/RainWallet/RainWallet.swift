@@ -110,14 +110,6 @@ public enum RainWalletEnvironment: Sendable, Equatable {
     case .production: "306c2e82-5ae2-4be6-8b41-1ab0cc6b0ab5"
     }
   }
-
-  /// `nil` in production, whose organization has no Auth Proxy configuration.
-  internal var authProxyConfigId: String? {
-    switch self {
-    case .sandbox: "1d8aac5e-f236-4800-bab7-98a9e27b4b2a"
-    case .production: nil
-    }
-  }
 }
 
 /// Mints a wallet auth token for the SDK's code flows. **Your backend** calls Rain's
@@ -229,8 +221,8 @@ public struct RainWalletSessionPolicy: Sendable {
 
 // MARK: - Configuration
 
-/// Configuration for the Rain wallet provider. The wallet backend identity (Rain's organization
-/// and authentication configuration) is embedded in the SDK — hosts configure which Rain
+/// Configuration for the Rain wallet provider. The wallet backend identity (Rain's organization)
+/// is embedded in the SDK — hosts configure which Rain
 /// environment to use, how the app obtains wallet auth tokens from their backend, and behavior.
 public struct RainWalletConfig: Sendable {
   /// Which Rain API the wallet authenticates against. Defaults to production: pointing a build
@@ -325,7 +317,6 @@ public struct RainProvider: ProviderDescriptor {
     self.backing = TurnkeyProvider(
       TurnkeyConfig(
         organizationId: config.environment.organizationId,
-        authProxyConfigId: config.environment.authProxyConfigId,
         authBackend: TurnkeyManagedAuthBackend(
           baseURL: config.environment.baseURL,
           tokenProvider: backingTokenProvider
