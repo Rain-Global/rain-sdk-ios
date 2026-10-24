@@ -13,6 +13,11 @@ import TurnkeyTypes
 /// and that a send is never submitted twice. Mirrors rain-sdk-android's send-outcome tests.
 @Suite("Turnkey Send Outcome Tests")
 struct TurnkeySendOutcomeTests {
+  /// `refusalLeavesAsItself` maps through `RainError.from` directly; the Turnkey mapper is
+  /// registered by `TurnkeyProvider.init`, which this suite never constructs, so register here
+  /// instead of relying on another suite having run first (CI ordering bit us).
+  init() { TurnkeyErrorMapping.registerOnce() }
+
   private static let caip2 = "eip155:1"
   private static let from = MockTurnkey.defaultWalletAddress
   private static let to = TestFixtures.recipientAddress

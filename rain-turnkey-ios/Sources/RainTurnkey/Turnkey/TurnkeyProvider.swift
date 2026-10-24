@@ -10,9 +10,9 @@ import TurnkeySwift
 /// (passkeys / auth proxy / OAuth / OTP) and hands the authenticated `TurnkeyContext` to Rain;
 /// the SDK never touches authentication.
 ///
-/// A second, **managed** mode (`init(organizationId:authProxyConfigId:...)`, where the SDK owns
-/// the email-OTP flow) exists behind `@_spi(RainWallet)` and ships to hosts only through the
-/// `RainWallet` module.
+/// A second, **managed** mode (`init(organizationId:authBackend:...)`, where the SDK owns the
+/// login flows against rain-api) exists behind `@_spi(RainWallet)` and ships to hosts only
+/// through the `RainWallet` module.
 ///
 /// `@unchecked Sendable`: `TurnkeyContext` is a reference type with mutable published state that
 /// Rain reads from arbitrary executors. BYO host contract: finish authentication before handing
@@ -22,12 +22,11 @@ public struct TurnkeyConfig: @unchecked Sendable {
   internal enum Mode: @unchecked Sendable {
     /// Host-authenticated context; the SDK exposes no auth surface.
     case byoContext(TurnkeyContext)
-    /// SDK-managed auth: one-time codes and signup/login go through rain-api (`authBackend`);
-    /// the Turnkey organization + auth-proxy configuration still back the vendor's passkey
-    /// signup. `rpId` is the passkey relying-party domain; `nil` disables passkey flows.
+    /// SDK-managed auth: codes, signup and passkey signup go through rain-api (`authBackend`);
+    /// the Turnkey organization is what sessions and passkey login are scoped to. `rpId` is the
+    /// passkey relying-party domain; `nil` disables passkey flows.
     case managed(
       organizationId: String,
-      authProxyConfigId: String,
       rpId: String?,
       authBackend: TurnkeyManagedAuthBackend
     )
@@ -74,8 +73,9 @@ public struct TurnkeyConfig: @unchecked Sendable {
     self.onSessionExpired = onSessionExpired
   }
 
-  /// Managed mode: the SDK configures Turnkey against this organization + auth-proxy
-  /// configuration and owns the email-OTP authentication flow.
+  /// Managed mode: the SDK configures Turnkey against this organization and owns authentication
+  /// — one-time codes, signup and passkey signup through rain-api, passkey login through
+  /// Turnkey directly.
   ///
   /// Not public API. `@_spi(RainWallet)`: managed auth ships exclusively through the
   /// `RainWallet` module's `RainProvider` — the public Turnkey provider is bring-your-own,
@@ -93,7 +93,6 @@ public struct TurnkeyConfig: @unchecked Sendable {
   @_spi(RainWallet)
   public init(
     organizationId: String,
-    authProxyConfigId: String,
     authBackend: TurnkeyManagedAuthBackend,
     rpId: String? = nil,
     walletAddress: String? = nil,
@@ -103,7 +102,6 @@ public struct TurnkeyConfig: @unchecked Sendable {
   ) {
     self.mode = .managed(
       organizationId: organizationId,
-      authProxyConfigId: authProxyConfigId,
       rpId: rpId,
       authBackend: authBackend
     )
@@ -151,12 +149,12 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
     case .byoContext(let turnkey):
       context = turnkey
       managedAuth = nil
-    case .managed(let organizationId, let authProxyConfigId, let rpId, let authBackend):
+    case .managed(let organizationId, let rpId, let authBackend):
       // One-shot per process; a mismatch is remembered and thrown from every auth call.
       let configurationError = TurnkeyManagedConfigurator.configure(
         organizationId: organizationId,
-        authProxyConfigId: authProxyConfigId,
-        rpId: rpId
+        rpId: rpId,
+        authBaseURL: authBackend.baseURL
       )
       let shared = TurnkeyManagedConfigurator.sharedContext()
       context = shared
@@ -194,7 +192,7 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
   /// (and its tests) see what its configuration translated to.
   @_spi(RainWallet)
   public var managedAuthBackend: TurnkeyManagedAuthBackend? {
-    if case .managed(_, _, _, let authBackend) = config.mode { return authBackend }
+    if case .managed(_, _, let authBackend) = config.mode { return authBackend }
     return nil
   }
 
@@ -373,7 +371,7 @@ extension TurnkeyProvider {
     guard let managedAuth else {
       throw RainError.invalidConfig(details:
         "Authentication methods are only available in managed mode — construct the provider with "
-        + "TurnkeyConfig(organizationId:authProxyConfigId:); in bring-your-own mode the host owns "
+        + "TurnkeyConfig(organizationId:authBackend:); in bring-your-own mode the host owns "
         + "authentication")
     }
     return managedAuth

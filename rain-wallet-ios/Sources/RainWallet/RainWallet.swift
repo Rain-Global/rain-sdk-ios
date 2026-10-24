@@ -212,8 +212,8 @@ public struct RainWalletSessionPolicy: Sendable {
 
 // MARK: - Configuration
 
-/// Configuration for the Rain wallet provider. The wallet backend identity (Rain's organization
-/// and authentication configuration) is embedded in the SDK — hosts configure which Rain
+/// Configuration for the Rain wallet provider. The wallet backend identity (Rain's organization)
+/// is embedded in the SDK — hosts configure which Rain
 /// environment to use, how the app obtains wallet auth tokens from their backend, and behavior.
 public struct RainWalletConfig: Sendable {
   /// Which Rain API the wallet authenticates against. Defaults to production: pointing a build
@@ -266,12 +266,12 @@ public struct RainWalletConfig: Sendable {
   }
 }
 
-/// Rain's wallet backend identity. Public identifiers, not secrets: possession grants nothing —
-/// authentication still runs the email one-time-code flow, and abuse is bounded by the backend's
-/// OTP rate limits. Embedded so hosts need zero configuration to use the Rain wallet.
+/// Rain's wallet backend identity: the Turnkey organization every Rain wallet account lives
+/// under. A public identifier, not a secret — authentication runs through rain-api on a token
+/// the partner's backend mints, so possession of the id grants nothing. Embedded so hosts
+/// configure only their own environment and token provider.
 internal enum RainWalletBackend {
   static let organizationId = "63495e45-8e64-42b5-b602-c68f019ca806"
-  static let authConfigId = "1d8aac5e-f236-4800-bab7-98a9e27b4b2a"
 }
 
 // MARK: - Provider
@@ -316,7 +316,6 @@ public struct RainProvider: ProviderDescriptor {
     self.backing = TurnkeyProvider(
       TurnkeyConfig(
         organizationId: RainWalletBackend.organizationId,
-        authProxyConfigId: RainWalletBackend.authConfigId,
         authBackend: TurnkeyManagedAuthBackend(
           baseURL: config.environment.baseURL,
           tokenProvider: backingTokenProvider
