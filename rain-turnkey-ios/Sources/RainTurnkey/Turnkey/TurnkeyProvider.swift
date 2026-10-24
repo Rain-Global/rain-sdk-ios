@@ -163,7 +163,8 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
         configurationError: configurationError,
         rpId: rpId,
         api: RainApiAuthClient(baseURL: authBackend.baseURL),
-        tokenProvider: authBackend.tokenProvider
+        tokenProvider: authBackend.tokenProvider,
+        pendingPasskeySignups: UserDefaultsPendingPasskeySignupStore(organizationId: organizationId)
       )
     }
 

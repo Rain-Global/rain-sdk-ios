@@ -816,7 +816,7 @@ struct TurnkeyManagedAuthTests {
     let suite = "rain-tests-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
-    let store = UserDefaultsPendingPasskeySignupStore(defaults: defaults)
+    let store = UserDefaultsPendingPasskeySignupStore(organizationId: "org-a", defaults: defaults)
     let registration = PasskeyRegistration(
       challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao",
       transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
@@ -826,6 +826,23 @@ struct TurnkeyManagedAuthTests {
     #expect(store.load() == registration)
     store.clear()
     #expect(store.load() == nil)
+  }
+
+  @Test("the persisted store keeps each organization's registration apart")
+  func testUserDefaultsStoreIsPerOrganization() {
+    let suite = "rain-tests-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let sandbox = UserDefaultsPendingPasskeySignupStore(organizationId: "org-sandbox", defaults: defaults)
+    let production = UserDefaultsPendingPasskeySignupStore(organizationId: "org-production", defaults: defaults)
+    let registration = PasskeyRegistration(
+      challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao",
+      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
+    )
+    sandbox.save(registration)
+    #expect(production.load() == nil)
+    production.clear()
+    #expect(sandbox.load() == registration)
   }
 
   @MainActor

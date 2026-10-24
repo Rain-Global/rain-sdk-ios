@@ -108,8 +108,13 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   (TurnkeyAuthSample drives the vendor SDK); managed email-OTP is demoed on the Rain Wallet tab.
 - PR B2 (DONE 2026-09-07; ids embedded 2026-09-11), `rain-wallet-ios` / `RainWallet`: renaming
   layer over managed RainTurnkey. DECISION 2026-09-11 (reverses the earlier host-supplied
-  design): Rain's org id is EMBEDDED in the module (`RainWalletBackend.organizationId` —
-  a public identifier, not a secret; `.authConfigId` was DELETED in PR H4 with the Auth Proxy). `RainWalletConfig(walletAddress:sessionPolicy:onSessionExpired:)`
+  design): Rain's org id is EMBEDDED in the module, PER ENVIRONMENT since WALL-150
+  (2026-10-24): `RainWalletEnvironment.organizationId` — sandbox = `63495e45-…`, production =
+  `306c2e82-5ae2-4be6-8b41-1ab0cc6b0ab5` (separate Turnkey parent orgs, so the configurator's
+  org-id key already separates environments; `RainWalletBackend` DELETED, `.authConfigId` went
+  earlier with the Auth Proxy in H4). Public identifiers, not secrets; abuse bounded by rate
+  limits. The pending passkey signup store is keyed per org
+  (`UserDefaultsPendingPasskeySignupStore(organizationId:)`, no default on the controller init). `RainWalletConfig(walletAddress:sessionPolicy:onSessionExpired:)`
   carries behavior only, and `RainProvider()` is zero-config (defaulted init). Descriptor struct
   `RainProvider`, id `ProviderId.rain`, neutral session surface (`RainWalletSessionState`,
   publisher, refreshSession). RainWallet @_exported imports RainCore only — NEVER RainTurnkey
@@ -222,7 +227,8 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   (+Session.swift sets it); passkey login builds its own passkey-stamped client and `stampLogin`s
   directly. The demo's BYO Turnkey tab still uses the proxy — the HOST's choice, untouched. Demo: `RainApiClient.mintWalletAuthToken` (Api-Key on device = DEMO ONLY, loud
   comment) feeds `prepareRainWallet`'s provider. Host surface: `RainWalletConfig`
-  gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz) / .custom(URL)`
+  gains `environment: .sandbox(api-dev.rain.xyz) / .production(api.rain.xyz)` (`.custom` REMOVED
+  in WALL-150 — each environment fixes host AND org, parity with Android + web)
   (DEFAULT .production) and `authTokenProvider: (RainWalletContact?) async throws -> String`
   (nil → code flows throw invalidConfig, passkey login works) — the PARTNER BACKEND
   mints the wallet auth token (`wat_…`, 10-min TTL, bound to one contact, contact-less only for

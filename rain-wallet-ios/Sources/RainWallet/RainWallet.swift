@@ -1,8 +1,9 @@
 // RainWallet — the Rain-branded wallet provider.
 //
-// The wallet backend identity is embedded in the SDK. Hosts configure the Rain environment, how
-// the app obtains wallet auth tokens from THEIR backend (minted with their Rain Api-Key — never
-// in the app), optional behavior, and their own passkey domain if they use passkeys.
+// The wallet backend identity is embedded in the SDK, one per Rain environment. Hosts configure
+// the Rain environment, how the app obtains wallet auth tokens from THEIR backend (minted with
+// their Rain Api-Key — never in the app), optional behavior, and their own passkey domain if
+// they use passkeys.
 // Authentication runs inside the SDK, and the resolved `RainClient` exposes the same wallet
 // surface as every other provider.
 //
@@ -85,20 +86,28 @@ public enum RainWalletContact: Sendable, Equatable {
 
 // MARK: - Backend environment and wallet auth tokens
 
-/// Which Rain API the wallet authenticates against.
+/// Which Rain deployment the wallet authenticates against. Each one fixes both the Rain API host
+/// and the wallet backend organization, so a sandbox account can never sign into production.
 public enum RainWalletEnvironment: Sendable, Equatable {
   /// Rain sandbox (`api-dev.rain.xyz`): test users, testnets.
   case sandbox
   /// Rain production (`api.rain.xyz`).
   case production
-  /// Another host, e.g. staging.
-  case custom(URL)
 
   internal var baseURL: URL {
     switch self {
     case .sandbox: URL(string: "https://api-dev.rain.xyz")!
     case .production: URL(string: "https://api.rain.xyz")!
-    case .custom(let url): url
+    }
+  }
+
+  /// Rain's wallet backend identity for this environment. Public identifiers, not secrets:
+  /// possession grants nothing — authentication still runs the one-time-code flow, and abuse is
+  /// bounded by the backend's rate limits. Embedded so hosts configure only the environment.
+  internal var organizationId: String {
+    switch self {
+    case .sandbox: "63495e45-8e64-42b5-b602-c68f019ca806"
+    case .production: "306c2e82-5ae2-4be6-8b41-1ab0cc6b0ab5"
     }
   }
 }
@@ -266,14 +275,6 @@ public struct RainWalletConfig: Sendable {
   }
 }
 
-/// Rain's wallet backend identity: the Turnkey organization every Rain wallet account lives
-/// under. A public identifier, not a secret — authentication runs through rain-api on a token
-/// the partner's backend mints, so possession of the id grants nothing. Embedded so hosts
-/// configure only their own environment and token provider.
-internal enum RainWalletBackend {
-  static let organizationId = "63495e45-8e64-42b5-b602-c68f019ca806"
-}
-
 // MARK: - Provider
 
 /// Registrable descriptor for the Rain wallet provider.
@@ -315,7 +316,7 @@ public struct RainProvider: ProviderDescriptor {
     }
     self.backing = TurnkeyProvider(
       TurnkeyConfig(
-        organizationId: RainWalletBackend.organizationId,
+        organizationId: config.environment.organizationId,
         authBackend: TurnkeyManagedAuthBackend(
           baseURL: config.environment.baseURL,
           tokenProvider: backingTokenProvider

@@ -260,7 +260,7 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     rpId: String? = nil,
     api: any RainApiAuthClientProtocol,
     tokenProvider: TurnkeyManagedAuthBackend.TokenProvider?,
-    pendingPasskeySignups: any PendingPasskeySignupStore = UserDefaultsPendingPasskeySignupStore()
+    pendingPasskeySignups: any PendingPasskeySignupStore
   ) {
     self.context = context
     self.configurationError = configurationError
