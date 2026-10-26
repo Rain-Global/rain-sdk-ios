@@ -392,7 +392,8 @@ public struct RainProvider: ProviderDescriptor {
   /// atomically. Every call mints a fresh account — returning users must use
   /// ``loginWithPasskey(anchor:)`` (or a login code), or they end up with a second, empty wallet.
   /// Asks ``RainWalletConfig/authTokenProvider`` for a contact-less token (`nil` contact) and
-  /// shows two biometric prompts: registration, then sign-in.
+  /// shows ONE biometric prompt, for the registration; the session is opened with a short-lived
+  /// key the backend attaches to the new account, so it always belongs to that account.
   public func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try requireOpen()
     try await backing.signUpWithPasskey(anchor: anchor)

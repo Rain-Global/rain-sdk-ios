@@ -407,7 +407,7 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     // Store under a fresh per-attempt session key: the vendor refuses only a same-key
     // collision, so an already-active session survives until the new one is selected.
     // Mirrors the Android SDK's behaviour.
-    let attemptKey = "rain-turnkey-\(UUID().uuidString)"
+    let attemptKey = Self.newAttemptSessionKey()
     let previousKey = context.selectedStoredSessionKey
     do {
       try await context.storeTurnkeySession(jwt: login.sessionToken, sessionKey: attemptKey)
@@ -415,21 +415,7 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       pendingOtpLock.withLock { pendingOtp = nil }
       throw RainError.from(underlying: error)
     }
-    do {
-      // The vendor auto-selects the new session only when none was selected; over a live
-      // session the attempt key must be activated explicitly.
-      if context.selectedStoredSessionKey != attemptKey {
-        try await context.selectStoredSession(sessionKey: attemptKey)
-      }
-    } catch {
-      // Don't leave the never-selected attempt session orphaned in the keychain.
-      context.clearStoredSession(sessionKey: attemptKey)
-      throw RainError.from(underlying: error)
-    }
-    // The previous session is superseded; drop it so per-attempt keys don't accumulate.
-    if let previousKey, previousKey != attemptKey {
-      context.clearStoredSession(sessionKey: previousKey)
-    }
+    try await activateStoredSession(attemptKey: attemptKey, previousKey: previousKey)
     pendingOtpLock.withLock { pendingOtp = nil }
     do {
       try await ensureWallets()
@@ -509,19 +495,27 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     }
   }
 
-  /// Creates a NEW account with a passkey: the platform registration ceremony, then rain-api's
-  /// `/signup/passkey` on a contact-less wallet auth token (rain-api provisions one seed with
-  /// both chain-family accounts), then the vendor's passkey login for the session — two
-  /// biometric prompts, since the signup returns no session (backend ask). Returning users must
-  /// use `loginWithPasskey` (or a login code): every call here mints a fresh account.
+  /// Creates a NEW account with a passkey, one biometric prompt: the registration ceremony, then
+  /// rain-api's `/signup/passkey` on a contact-less wallet auth token (rain-api provisions one
+  /// seed with both chain-family accounts and attaches the device's temporary key to the new
+  /// account as a 60-second API key), then a session stamped with that key. The key exists
+  /// only on the account the signup created, so the session can only be for that account — a
+  /// passkey prompt here would list the user's earlier look-alike passkeys for this domain and
+  /// could sign them into an old account. Returning users must use `loginWithPasskey` (or a
+  /// login code): every call here mints a fresh account.
+  ///
+  /// The key login falls back to the vendor's passkey login (a second prompt) when rain-api
+  /// attached no key: it adopted an account this tenant created earlier but never saved, or
+  /// the 60 s passed. A failed key login stores nothing, so the fallback is what every signup
+  /// did before.
   ///
   /// Order matters for what a failure leaves behind: the token is minted before the ceremony so
   /// a host without a backend fails before Face ID. A signup whose outcome is UNKNOWN — timeout,
-  /// transport failure, 5xx, rate limit — keeps the registration (persisted), and the next call
-  /// resends it rather than registering a second passkey: rain-api may have created the account
-  /// past our timeout, and only a resend of the same credential lets it record that account.
-  /// A definitive refusal clears it. A login failure after a successful signup leaves an account
-  /// the same passkey signs into with `loginWithPasskey`.
+  /// transport failure, 5xx, rate limit — keeps the registration and its key (persisted), and
+  /// the next call resends both rather than registering a second passkey: rain-api may have
+  /// created the account past our timeout, and only a resend of the same credential lets it
+  /// record that account. A definitive refusal clears it. A login failure after a successful
+  /// signup leaves an account the same passkey signs into with `loginWithPasskey`.
   internal func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try throwIfMisconfigured()
     let rpId = try requirePasskeysConfigured()
@@ -534,8 +528,9 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       registration = pending
       resuming = true
     } else {
+      let loginKey = context.makeTemporaryApiKey()
       do {
-        registration = try await context.registerPasskey(anchor: anchor, rpId: rpId)
+        registration = try await context.registerPasskey(anchor: anchor, rpId: rpId, loginKey: loginKey)
       } catch {
         throw RainError.from(underlying: error)
       }
@@ -544,16 +539,22 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       resuming = false
     }
 
-    try await signUpPasskey(token: token, registration: registration, resuming: resuming)
+    let subOrganizationId = try await signUpPasskey(token: token, registration: registration, resuming: resuming)
 
-    let previousKey = context.selectedStoredSessionKey
-    preparePasskeyDefaultKey()
-    do {
-      try await context.loginWithTurnkeyPasskey(anchor: anchor)
-    } catch {
-      throw RainError.from(underlying: error)
+    var sessionOpened = false
+    if let subOrganizationId {
+      sessionOpened = try await loginWithSignupKey(registration.loginKey, organizationId: subOrganizationId)
     }
-    try await activatePasskeySession(previousKey: previousKey)
+    if !sessionOpened {
+      let previousKey = context.selectedStoredSessionKey
+      preparePasskeyDefaultKey()
+      do {
+        try await context.loginWithTurnkeyPasskey(anchor: anchor)
+      } catch {
+        throw RainError.from(underlying: error)
+      }
+      try await activatePasskeySession(previousKey: previousKey)
+    }
     do {
       try await ensureWallets()
     } catch {
@@ -561,31 +562,52 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     }
   }
 
+  /// False when the key login failed: nothing was stored, so the caller falls back to a passkey
+  /// login. Only cancellation propagates.
+  private func loginWithSignupKey(_ key: TemporaryApiKey, organizationId: String) async throws -> Bool {
+    let attemptKey = Self.newAttemptSessionKey()
+    let previousKey = context.selectedStoredSessionKey
+    do {
+      try await context.loginWithTemporaryKey(organizationId: organizationId, key: key, sessionKey: attemptKey)
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch {
+      if Task.isCancelled { throw CancellationError() }
+      RainLogger.warning("Rain SDK: signup key login failed, falling back to passkey login: \(error)")
+      return false
+    }
+    try await activateStoredSession(attemptKey: attemptKey, previousKey: previousKey)
+    return true
+  }
+
   /// `/signup/passkey` with the one-renewal token rule, sorting its endings into what the
-  /// pending store must do. Returns normally when an account for this passkey exists — created
-  /// now, or (on a resend) found from the earlier try.
+  /// pending store must do. Nil when a resend was told the account is already saved (409):
+  /// only a passkey login can open it.
   private func signUpPasskey(
     token: String,
     registration: PasskeyRegistration,
     resuming: Bool
-  ) async throws {
+  ) async throws -> String? {
     do {
+      let signup: RainApiSignup
       do {
-        _ = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
+        signup = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
       } catch let error as RainApiAuthError where error.kind == .tokenRejected || Self.isTokenUsed(error) {
         // The user has already done Face ID; giving up would leave a passkey no account knows
         // and make the next try mint a look-alike. Same one-renewal rule as the code flow. A
         // 409 "token already used" (a host that cached its token) is the same situation.
         let renewed = try await mintToken(for: nil)
-        _ = try await api.signupPasskey(token: renewed, attestation: registration.apiAttestation)
+        signup = try await api.signupPasskey(token: renewed, attestation: registration.apiAttestation)
       }
       pendingPasskeySignups.clear()
+      return signup.subOrganizationId
     } catch is CancellationError {
       throw CancellationError() // outcome unknown: the registration stays
     } catch let error as RainApiAuthError {
       switch Self.passkeySignupEnding(error, resuming: resuming) {
       case .accountExists:
         pendingPasskeySignups.clear()
+        return nil
       case .inProgress:
         throw RainError.providerError(underlying: TurnkeyPasskeySignupInProgress(message: error.message))
       case .refused:
@@ -687,9 +709,28 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     }
   }
 
-  /// Mirrors the OTP flow's activation: the vendor auto-selects only when nothing was selected,
-  /// so over a live session the fresh passkey session (always under the default key) is
-  /// activated explicitly, then the superseded key is purged.
+  private static func newAttemptSessionKey() -> String {
+    "rain-turnkey-\(UUID().uuidString)"
+  }
+
+  /// The vendor auto-selects a stored session only when none was selected; over a live session
+  /// the attempt key is activated explicitly, then the superseded key is purged.
+  private func activateStoredSession(attemptKey: String, previousKey: String?) async throws {
+    do {
+      if context.selectedStoredSessionKey != attemptKey {
+        try await context.selectStoredSession(sessionKey: attemptKey)
+      }
+    } catch {
+      // Don't leave the never-selected attempt session orphaned in the keychain.
+      context.clearStoredSession(sessionKey: attemptKey)
+      throw RainError.from(underlying: error)
+    }
+    if let previousKey, previousKey != attemptKey {
+      context.clearStoredSession(sessionKey: previousKey)
+    }
+  }
+
+  /// Same for a passkey session, which the vendor always stores under ITS default key.
   private func activatePasskeySession(previousKey: String?) async throws {
     do {
       if context.selectedStoredSessionKey != Self.passkeyDefaultSessionKey {

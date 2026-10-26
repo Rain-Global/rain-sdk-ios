@@ -478,12 +478,23 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
   /// rpIds the registration ceremony ran for.
   var registerPasskeyCalls: [String] = []
   var registerPasskeyError: Error?
+  /// The ceremony result; the login key is whatever the controller handed in.
   var stubbedRegistration = PasskeyRegistration(
     challenge: "Y2hhbGxlbmdl", credentialId: "cred-1", clientDataJson: "eyJ0eXBlIjoi",
-    attestationObject: "o2NmbXQ", transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
+    attestationObject: "o2NmbXQ", transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"],
+    loginKey: TemporaryApiKey(publicKey: "unset", privateKey: "unset")
   )
-  /// Runs after a successful passkey login/signup — install the new session / authState here.
+  /// Runs after a passkey login or a signup's key login opened a session — install the new
+  /// session / authState here.
   var onPasskeyAuth: (() -> Void)?
+  /// Every registration the ceremony returned (the stub fields plus the controller's key).
+  var registrations: [PasskeyRegistration] = []
+
+  var temporaryKeysMade: [TemporaryApiKey] = []
+  struct TemporaryKeyLoginCall: Equatable { let organizationId: String; let key: TemporaryApiKey; let sessionKey: String }
+  var temporaryKeyLoginCalls: [TemporaryKeyLoginCall] = []
+  /// What an adopted account (no key attached) or an expired key produces.
+  var temporaryKeyLoginError: Error?
 
   var addPasskeyCalls: [String] = [] // rpIds
   var addPasskeyError: Error?
@@ -494,10 +505,32 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
     try storePasskeySession()
   }
 
-  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
+  func makeTemporaryApiKey() -> TemporaryApiKey {
+    let key = TemporaryApiKey(
+      publicKey: "02temp-\(temporaryKeysMade.count + 1)",
+      privateKey: "priv-\(temporaryKeysMade.count + 1)"
+    )
+    temporaryKeysMade.append(key)
+    return key
+  }
+
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String, loginKey: TemporaryApiKey) async throws -> PasskeyRegistration {
     registerPasskeyCalls.append(rpId)
     if let registerPasskeyError { throw registerPasskeyError }
-    return stubbedRegistration
+    let registration = PasskeyRegistration(
+      challenge: stubbedRegistration.challenge, credentialId: stubbedRegistration.credentialId,
+      clientDataJson: stubbedRegistration.clientDataJson, attestationObject: stubbedRegistration.attestationObject,
+      transports: stubbedRegistration.transports, loginKey: loginKey
+    )
+    registrations.append(registration)
+    return registration
+  }
+
+  func loginWithTemporaryKey(organizationId: String, key: TemporaryApiKey, sessionKey: String) async throws {
+    temporaryKeyLoginCalls.append(.init(organizationId: organizationId, key: key, sessionKey: sessionKey))
+    if let temporaryKeyLoginError { throw temporaryKeyLoginError }
+    try await storeTurnkeySession(jwt: "jwt-signup-\(organizationId)", sessionKey: sessionKey)
+    onPasskeyAuth?()
   }
 
   /// Vendor behaviour at 4.0.0: passkey sessions always store under the DEFAULT key (the

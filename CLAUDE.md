@@ -197,14 +197,35 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   verification token. `TurnkeyConfig` managed init requires `authBackend:
   TurnkeyManagedAuthBackend(baseURL:tokenProvider:)` (SPI). `invalidateExisting` is GONE: a
   second device no longer logs the first out (test plan B7 now expects success — backend ask).
-  PR H3 (IN PROGRESS 2026-10-22, branch volo/feature/rain-api-passkey-signup): passkey SIGNUP
+  PR H3 (DONE 2026-10-22, #47): passkey SIGNUP
   = `mintToken(for: nil)` (contact-less, BEFORE Face ID so a host without a backend fails
-  first) → `context.registerPasskey(anchor:rpId:)` (the platform ceremony alone, returns
+  first) → `context.registerPasskey(anchor:rpId:loginKey:)` (the platform ceremony alone, returns
   module-owned `PasskeyRegistration` = challenge + v1Attestation fields, transports as raw
-  values) → `/signup/passkey` (409 → invalidConfig steering to loginWithPasskey; other
-  refusals mapped) → vendor `loginWithTurnkeyPasskey` for the session (SECOND biometric
-  prompt; signup returns no session — backend ask) inside the same prepare/activate/purge
-  dance as login. `signUpWithTurnkeyPasskey` (vendor proxy signup + customWallet) is GONE;
+  values, + the login key) → `/signup/passkey` (409 → invalidConfig steering to loginWithPasskey; other
+  refusals mapped) → session. ONE-PROMPT SESSION (PR H5, 2026-10-26, branch
+  volo/feature/passkey-signup-session-key; replaces the SECOND biometric prompt H3 shipped with):
+  the device makes an in-memory P256 pair BEFORE the ceremony (`context.makeTemporaryApiKey()`
+  = vendor `TurnkeyCrypto.generateP256KeyPair`, compressed pubkey hex), sends `publicKey`
+  top-level on `/signup/passkey`, rain-api attaches it to the new root user as a 60 s API key
+  (`SESSION_KEY_SECONDS`, `embeddedWalletSignupController.ts`), and
+  `context.loginWithTemporaryKey(organizationId:key:sessionKey:)` does what the vendor's
+  proxy-era signup did (verified in source, TurnkeyContext+Passkey.swift):
+  `TurnkeyClient(apiPrivateKey:apiPublicKey:organizationId:)` (baseUrl default = the context's
+  host) → `createKeyPair()` for the session key → `stampLogin(expirationSeconds: "900",
+  invalidateExisting: false)` → `storeSession(jwt:sessionKey:)` under a per-attempt key like
+  the code flow (`activateStoredSession` is now shared by both). The key only exists on the
+  account the signup created → the session can only be for that account (the second passkey
+  prompt listed every look-alike `passkey-<ts>` for the domain and could sign into an OLD
+  account while the SDK reported success). FALLBACK: a failed key login (anything but
+  cancellation) stores nothing, so the controller runs the old `loginWithTurnkeyPasskey` path
+  (second prompt) — the only expected cause is rain-api ADOPTING an unsaved account this tenant
+  created earlier (no key attached; the response is identical `{subOrganizationId}`, so the
+  device cannot tell — backend ask: a `sessionKeyAttached: false` flag) or the 60 s passing. A
+  resend answered 409 "already has a wallet" returns no sub-org id → passkey login. The key is
+  PERSISTED with the registration (`PasskeyRegistration.loginKey`, `TemporaryApiKey`) so a
+  resend sends the SAME publicKey; a pre-H5 persisted registration fails to decode and is
+  dropped (beta only). Android: same change once its passkey signup is on rain-api.
+  `signUpWithTurnkeyPasskey` (vendor proxy signup + customWallet) is GONE;
   `addPasskeyAuthenticator` unchanged. UNKNOWN-OUTCOME RULE (review #47): rain-api keeps
   creating the account past our timeout and only RECORDS a lost account when the SAME credential
   is resent to /signup/passkey — a dropped registration would mean a second passkey + second
@@ -249,8 +270,9 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   rain-api's clientSignature JSON = vendor `v1ClientSignature` shape (`publicKey, scheme:
   "CLIENT_SIGNATURE_SCHEME_API_P256", message, signature`). `TurnkeyContext.configure` keeps
   organizationId + rpId only (H4). Backend asks outstanding: /login
-  doesn't revoke other sessions (we rely on invalidateExisting today → B7); passkey signup
-  returns no session (two biometric prompts); attaching an already-walleted contact → next
+  doesn't revoke other sessions (we rely on invalidateExisting today → B7); passkey signup's
+  adopted-account response is indistinguishable from a fresh one (want `sessionKeyAttached`,
+  see H5; the "no session" ask itself was RESOLVED by the 60 s signup key); attaching an already-walleted contact → next
   login 500; errors carry no machine code (string matching); 429 has no RAIN code (propose
   RAIN_204 tooManyAttempts cross-platform).
 - PR E (IN PROGRESS 2026-09-17, branch volo/feature/handle-gas-sponsorship), gas sponsorship +

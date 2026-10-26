@@ -135,10 +135,17 @@ internal protocol TurnkeyContextProtocol: AnyObject {
   /// ignored — see `TurnkeyManagedAuthController`'s passkey session handling.
   func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws
 
+  /// A fresh in-memory P256 pair for one passkey signup (see `TemporaryApiKey`).
+  func makeTemporaryApiKey() -> TemporaryApiKey
+
   /// Runs the platform passkey-registration ceremony for `rpId` and returns what rain-api's
-  /// `/signup/passkey` needs. No account, no session — the controller signs the account up
-  /// through rain-api and then logs in with `loginWithTurnkeyPasskey`.
-  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration
+  /// `/signup/passkey` needs. No account, no session.
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String, loginKey: TemporaryApiKey) async throws -> PasskeyRegistration
+
+  /// `stamp_login` on `organizationId` stamped with the temporary key rain-api attached at
+  /// signup — no biometric prompt — stored under `sessionKey`. Fails when the account carries no
+  /// such key or its 60-second life has passed.
+  func loginWithTemporaryKey(organizationId: String, key: TemporaryApiKey, sessionKey: String) async throws
 
   /// Registers an additional passkey authenticator on the authenticated user. No new account,
   /// no session change — afterwards the passkey signs into THIS account.
@@ -167,9 +174,18 @@ internal protocol TurnkeyContextProtocol: AnyObject {
   ) async throws -> String
 }
 
+/// The device's login key for one passkey signup, hex; the public key compressed, as Turnkey
+/// API keys take it. Persisted with the registration so a resend carries the same public key.
+/// The private key is worth little on its own: it authorises a 60-second API key on an account
+/// only the same passkey can otherwise open.
+internal struct TemporaryApiKey: Sendable, Equatable, Codable {
+  let publicKey: String
+  let privateKey: String
+}
+
 /// A freshly registered passkey, in the shape rain-api's `/signup/passkey` validates (the
-/// vendor's `v1Attestation` plus the challenge). Module-owned so mocks need not build the
-/// vendor type.
+/// vendor's `v1Attestation` plus the challenge), together with the login key sent alongside it.
+/// Module-owned so mocks need not build the vendor type.
 internal struct PasskeyRegistration: Sendable, Equatable, Codable {
   let challenge: String
   let credentialId: String
@@ -177,6 +193,7 @@ internal struct PasskeyRegistration: Sendable, Equatable, Codable {
   let attestationObject: String
   /// Vendor `v1AuthenticatorTransport` raw values.
   let transports: [String]
+  let loginKey: TemporaryApiKey
 
   var apiAttestation: RainApiPasskeyAttestation {
     RainApiPasskeyAttestation(
@@ -186,7 +203,8 @@ internal struct PasskeyRegistration: Sendable, Equatable, Codable {
         clientDataJson: clientDataJson,
         attestationObject: attestationObject,
         transports: transports
-      )
+      ),
+      publicKey: loginKey.publicKey
     )
   }
 }
@@ -312,7 +330,16 @@ extension TurnkeyContext: TurnkeyContextProtocol {
     _ = try await loginWithPasskey(anchor: anchor)
   }
 
-  internal func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
+  internal func makeTemporaryApiKey() -> TemporaryApiKey {
+    let (_, publicKeyCompressed, privateKey) = TurnkeyCrypto.generateP256KeyPair()
+    return TemporaryApiKey(publicKey: publicKeyCompressed, privateKey: privateKey)
+  }
+
+  internal func registerPasskey(
+    anchor: ASPresentationAnchor,
+    rpId: String,
+    loginKey: TemporaryApiKey
+  ) async throws -> PasskeyRegistration {
     let passkeyName = "passkey-\(Int(Date().timeIntervalSince1970))"
     let passkey = try await createPasskey(
       user: PasskeyUser(id: UUID().uuidString, name: passkeyName, displayName: passkeyName),
@@ -324,9 +351,35 @@ extension TurnkeyContext: TurnkeyContextProtocol {
       credentialId: passkey.attestation.credentialId,
       clientDataJson: passkey.attestation.clientDataJson,
       attestationObject: passkey.attestation.attestationObject,
-      transports: passkey.attestation.transports.map(\.rawValue)
+      transports: passkey.attestation.transports.map(\.rawValue),
+      loginKey: loginKey
     )
   }
+
+  internal func loginWithTemporaryKey(
+    organizationId: String,
+    key: TemporaryApiKey,
+    sessionKey: String
+  ) async throws {
+    // Mirrors the vendor's own proxy-era `signUpWithPasskey` (swift-sdk 4.0.0,
+    // TurnkeyContext+Passkey.swift). `baseUrl` defaults to the host the context uses. 900 s
+    // matches the sessions rain-api's `/login` issues.
+    let temporaryClient = TurnkeyClient(
+      apiPrivateKey: key.privateKey,
+      apiPublicKey: key.publicKey,
+      organizationId: organizationId
+    )
+    let sessionPublicKey = try createKeyPair()
+    let login = try await temporaryClient.stampLogin(TStampLoginBody(
+      organizationId: organizationId,
+      expirationSeconds: Self.signupSessionExpirationSeconds,
+      invalidateExisting: false,
+      publicKey: sessionPublicKey
+    ))
+    try await storeSession(jwt: login.session, sessionKey: sessionKey)
+  }
+
+  private static let signupSessionExpirationSeconds = "900"
 
   internal func addPasskeyAuthenticator(anchor: ASPresentationAnchor, rpId: String) async throws {
     // The vendor has no high-level "add a passkey to the current account" at 4.0.0; composed
