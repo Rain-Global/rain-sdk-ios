@@ -989,6 +989,38 @@ struct TurnkeyManagedAuthTests {
     #expect(h.turnkey.setUserEmailCalls.map(\.contact) == ["new@example.com"])
   }
 
+  @Test("attaching a contact that is already another wallet's login is refused with RAIN_202 and nothing is updated")
+  func testAttachContactOwnedByAnotherWalletIsRefused() async throws {
+    let h = Harness(turnkey: MockTurnkey(session: MockTurnkey.defaultSession(organizationId: "org-mine")))
+    h.api.verifiedContactWalletSubOrganizationId = "org-theirs"
+    try await h.controller.sendContactVerificationCode(to: .email("shared@example.com"))
+
+    let error = await #expect(throws: RainError.self) {
+      try await h.controller.confirmContactVerification("123456")
+    }
+    #expect(error?.code == "RAIN_202")
+    #expect(h.turnkey.setUserEmailCalls.isEmpty, "the other wallet's login must not be taken over")
+    #expect(h.api.endpoints == [.initOtp, .verifyOtp], "refused after the code proved ownership, not before")
+
+    // The challenge is gone: the user starts over rather than retyping into a refused attach.
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.confirmContactVerification("123456")
+    }
+  }
+
+  @Test("a contact this account already owns can be re-attached, and no saved wallet means a free contact")
+  func testAttachContactOwnedBySelfOrNobodyProceeds() async throws {
+    for owner: String? in ["org-mine", nil] {
+      let h = Harness(turnkey: MockTurnkey(session: MockTurnkey.defaultSession(organizationId: "org-mine")))
+      h.api.verifiedContactWalletSubOrganizationId = owner
+
+      try await h.controller.sendContactVerificationCode(to: .email("mine@example.com"))
+      try await h.controller.confirmContactVerification("123456")
+
+      #expect(h.turnkey.setUserEmailCalls.map(\.contact) == ["mine@example.com"], "owner: \(owner ?? "none")")
+    }
+  }
+
   // MARK: - Key export
 
   @Test("exportMnemonic exports the account's single wallet seed")

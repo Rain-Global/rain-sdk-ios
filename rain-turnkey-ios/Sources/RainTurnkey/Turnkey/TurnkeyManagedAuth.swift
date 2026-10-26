@@ -731,6 +731,13 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   /// so it becomes a login method for this account. The verification token rain-api returns is
   /// the same Turnkey token the vendor's `updateUserEmail` / `updateUserPhoneNumber` accept. A
   /// wrong code throws `invalidLoginCode` and keeps the challenge, so the user can retype it.
+  ///
+  /// Refused with `unauthorized` (RAIN_202) when the contact is already the login of ANOTHER
+  /// wallet in this tenant: attaching it would leave rain-api with two wallets for one contact,
+  /// after which every code login for it fails (500), and the vendor's update REPLACES this
+  /// account's existing contact, so both wallets could end up with no code login at all.
+  /// Re-attaching a contact this account already owns is allowed. The challenge is dropped
+  /// either way; the user has to start over.
   internal func confirmContactVerification(_ code: String) async throws {
     try throwIfMisconfigured()
     guard var pending = pendingOtpLock.withLock({ pendingContactVerification }) else {
@@ -747,6 +754,11 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       let otpId = pending.challenge.otpId
       let verification = try await withTokenRetry(&pending) { token in
         try await api.verifyOtp(token: token, otpId: otpId, encryptedOtpBundle: encrypted)
+      }
+      if let owner = verification.walletSubOrganizationId, owner != context.session?.organizationId {
+        pendingOtpLock.withLock { pendingContactVerification = nil }
+        throw RainError.unauthorized(details:
+          "This contact is already the login for another wallet; sign in to that wallet instead")
       }
       switch pending.contact {
       case .email(let email):

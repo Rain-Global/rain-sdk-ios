@@ -17,6 +17,8 @@ final class MockRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
 
   var challenge = RainApiOtpChallenge(otpId: "otp-1", otpEncryptionTargetBundle: "bundle-1")
   var verificationToken = "vt-1"
+  /// What `/otp/verify` reports as the saved wallet for the token's contact (nil = none).
+  var verifiedContactWalletSubOrganizationId: String?
   var login = RainApiLogin(
     sessionToken: "jwt-1", expiresAt: "2026-10-21T00:15:00Z", providerUserId: "user-1",
     walletAddress: "0xeddf67f4b6ba6da613cc1c24433073d6ab4c885d",
@@ -63,7 +65,9 @@ final class MockRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
     try record(.verifyOtp, token)
     verifyOtpBodies.append((otpId, encryptedOtpBundle))
     if let verifyOtpError { throw verifyOtpError }
-    return RainApiVerification(verificationToken: verificationToken)
+    return RainApiVerification(
+      verificationToken: verificationToken, walletSubOrganizationId: verifiedContactWalletSubOrganizationId
+    )
   }
 
   func signup(token: String, verificationToken: String, clientSignature: RainApiClientSignature) async throws -> RainApiSignup {

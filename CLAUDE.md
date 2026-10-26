@@ -194,7 +194,17 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   only) → /signup → /login again with subOrganizationId, same token + verification token.
   `.tokenRejected` mid-flow → ONE renewal from the host (`withTokenRetry`). Contact attach =
   token for the NEW contact → init/verify → vendor `updateUserEmail/Phone` with rain-api's
-  verification token. `TurnkeyConfig` managed init requires `authBackend:
+  verification token. OWNERSHIP CHECK (2026-10-26, branch
+  volo/feature/refuse-contact-attach-to-other-wallet): `/otp/verify` also returns
+  `walletSubOrganizationId: String?` — the wallet this tenant has SAVED for the token's contact
+  (looked up only after the code verified, so the caller already proved they own the contact);
+  `confirmContactVerification` throws `unauthorized` RAIN_202 and drops the challenge when it
+  is set and ≠ `session.organizationId` (the id, not a Bool, so re-attaching one's own contact
+  still works). Without it the attach went through, rain-api then found TWO wallets for the
+  contact and every code login 500'd (`findSavedSubOrg`), and the vendor update REPLACES the
+  account's existing email, so both wallets could lose code login. The pre-rain-api SDK asked
+  the Auth Proxy; Android's cutover (#77) dropped the check — flag for parity (same field).
+  Login (`confirmLoginCode`) ignores the field. `TurnkeyConfig` managed init requires `authBackend:
   TurnkeyManagedAuthBackend(baseURL:tokenProvider:)` (SPI). `invalidateExisting` is GONE: a
   second device no longer logs the first out (test plan B7 now expects success — backend ask).
   PR H3 (IN PROGRESS 2026-10-22, branch volo/feature/rain-api-passkey-signup): passkey SIGNUP
@@ -251,7 +261,8 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   organizationId + rpId only (H4). Backend asks outstanding: /login
   doesn't revoke other sessions (we rely on invalidateExisting today → B7); passkey signup
   returns no session (two biometric prompts); attaching an already-walleted contact → next
-  login 500; errors carry no machine code (string matching); 429 has no RAIN code (propose
+  login 500 (RESOLVED: `/otp/verify` `walletSubOrganizationId` + SDK refusal, see above);
+  errors carry no machine code (string matching); 429 has no RAIN code (propose
   RAIN_204 tooManyAttempts cross-platform).
 - PR E (IN PROGRESS 2026-09-17, branch volo/feature/handle-gas-sponsorship), gas sponsorship +
   fail-closed sends on chains Turnkey cannot broadcast on — a mirror of Android's WALL-31 and its

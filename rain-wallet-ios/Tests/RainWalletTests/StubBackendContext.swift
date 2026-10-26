@@ -129,7 +129,7 @@ final class StubRainApiAuthClient: RainApiAuthClientProtocol, @unchecked Sendabl
   }
   func verifyOtp(token: String, otpId: String, encryptedOtpBundle: String) async throws -> RainApiVerification {
     tokens.append(token)
-    return RainApiVerification(verificationToken: verificationToken)
+    return RainApiVerification(verificationToken: verificationToken, walletSubOrganizationId: nil)
   }
   func signup(token: String, verificationToken: String, clientSignature: RainApiClientSignature) async throws -> RainApiSignup {
     tokens.append(token)
