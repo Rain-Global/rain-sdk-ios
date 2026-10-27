@@ -199,13 +199,15 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   second device no longer logs the first out (test plan B7 now expects success — backend ask).
   PR H3 (DONE 2026-10-22, #47): passkey SIGNUP
   = `mintToken(for: nil)` (contact-less, BEFORE Face ID so a host without a backend fails
-  first) → `context.registerPasskey(anchor:rpId:loginKey:)` (the platform ceremony alone, returns
+  first) → `context.registerPasskey(anchor:rpId:)` (the platform ceremony alone, returns
   module-owned `PasskeyRegistration` = challenge + v1Attestation fields, transports as raw
-  values, + the login key) → `/signup/passkey` (409 → invalidConfig steering to loginWithPasskey; other
+  values) → `/signup/passkey` (409 → invalidConfig steering to loginWithPasskey; other
   refusals mapped) → session. ONE-PROMPT SESSION (PR H5, 2026-10-26, branch
   volo/feature/passkey-signup-session-key; replaces the SECOND biometric prompt H3 shipped with):
-  the device makes an in-memory P256 pair BEFORE the ceremony (`context.makeTemporaryApiKey()`
-  = vendor `TurnkeyCrypto.generateP256KeyPair`, compressed pubkey hex), sends `publicKey`
+  the device makes an in-memory P256 pair per attempt (`context.makeTemporaryApiKey()`
+  = vendor `TurnkeyCrypto.generateP256KeyPair`, compressed pubkey hex; NEVER persisted — review
+  H5: the vendor's own signup keeps it a local, and a resend makes a fresh one;
+  `registration.apiAttestation(loginKey:)` joins them at call time), sends `publicKey`
   top-level on `/signup/passkey`, rain-api attaches it to the new root user as a 60 s API key
   (`SESSION_KEY_SECONDS`, `embeddedWalletSignupController.ts`), and
   `context.loginWithTemporaryKey(organizationId:key:sessionKey:)` does what the vendor's
@@ -221,10 +223,10 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   (second prompt) — the only expected cause is rain-api ADOPTING an unsaved account this tenant
   created earlier (no key attached; the response is identical `{subOrganizationId}`, so the
   device cannot tell — backend ask: a `sessionKeyAttached: false` flag) or the 60 s passing. A
-  resend answered 409 "already has a wallet" returns no sub-org id → passkey login. The key is
-  PERSISTED with the registration (`PasskeyRegistration.loginKey`, `TemporaryApiKey`) so a
-  resend sends the SAME publicKey; a pre-H5 persisted registration fails to decode and is
-  dropped (beta only). Android: same change once its passkey signup is on rain-api.
+  resend answered 409 "already has a wallet" returns no sub-org id → passkey login. A resend
+  whose first try DID land is answered by the adopt path (no key) → passkey login too, so
+  reusing the key across a resend would buy nothing. Android: same change once its passkey
+  signup is on rain-api.
   `signUpWithTurnkeyPasskey` (vendor proxy signup + customWallet) is GONE;
   `addPasskeyAuthenticator` unchanged. UNKNOWN-OUTCOME RULE (review #47): rain-api keeps
   creating the account past our timeout and only RECORDS a lost account when the SAME credential

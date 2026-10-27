@@ -140,7 +140,7 @@ internal protocol TurnkeyContextProtocol: AnyObject {
 
   /// Runs the platform passkey-registration ceremony for `rpId` and returns what rain-api's
   /// `/signup/passkey` needs. No account, no session.
-  func registerPasskey(anchor: ASPresentationAnchor, rpId: String, loginKey: TemporaryApiKey) async throws -> PasskeyRegistration
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration
 
   /// `stamp_login` on `organizationId` stamped with the temporary key rain-api attached at
   /// signup — no biometric prompt — stored under `sessionKey`. Fails when the account carries no
@@ -175,17 +175,16 @@ internal protocol TurnkeyContextProtocol: AnyObject {
 }
 
 /// The device's login key for one passkey signup, hex; the public key compressed, as Turnkey
-/// API keys take it. Persisted with the registration so a resend carries the same public key.
-/// The private key is worth little on its own: it authorises a 60-second API key on an account
-/// only the same passkey can otherwise open.
-internal struct TemporaryApiKey: Sendable, Equatable, Codable {
+/// API keys take it. Lives in memory for one attempt only — never persisted, like the vendor's
+/// own signup; a resend makes a fresh one.
+internal struct TemporaryApiKey: Sendable, Equatable {
   let publicKey: String
   let privateKey: String
 }
 
 /// A freshly registered passkey, in the shape rain-api's `/signup/passkey` validates (the
-/// vendor's `v1Attestation` plus the challenge), together with the login key sent alongside it.
-/// Module-owned so mocks need not build the vendor type.
+/// vendor's `v1Attestation` plus the challenge). Module-owned so mocks need not build the vendor
+/// type. Public material only: it is persisted between an unknown-outcome signup and its resend.
 internal struct PasskeyRegistration: Sendable, Equatable, Codable {
   let challenge: String
   let credentialId: String
@@ -193,9 +192,8 @@ internal struct PasskeyRegistration: Sendable, Equatable, Codable {
   let attestationObject: String
   /// Vendor `v1AuthenticatorTransport` raw values.
   let transports: [String]
-  let loginKey: TemporaryApiKey
 
-  var apiAttestation: RainApiPasskeyAttestation {
+  func apiAttestation(loginKey: TemporaryApiKey) -> RainApiPasskeyAttestation {
     RainApiPasskeyAttestation(
       challenge: challenge,
       attestation: .init(
@@ -335,11 +333,7 @@ extension TurnkeyContext: TurnkeyContextProtocol {
     return TemporaryApiKey(publicKey: publicKeyCompressed, privateKey: privateKey)
   }
 
-  internal func registerPasskey(
-    anchor: ASPresentationAnchor,
-    rpId: String,
-    loginKey: TemporaryApiKey
-  ) async throws -> PasskeyRegistration {
+  internal func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
     let passkeyName = "passkey-\(Int(Date().timeIntervalSince1970))"
     let passkey = try await createPasskey(
       user: PasskeyUser(id: UUID().uuidString, name: passkeyName, displayName: passkeyName),
@@ -351,8 +345,7 @@ extension TurnkeyContext: TurnkeyContextProtocol {
       credentialId: passkey.attestation.credentialId,
       clientDataJson: passkey.attestation.clientDataJson,
       attestationObject: passkey.attestation.attestationObject,
-      transports: passkey.attestation.transports.map(\.rawValue),
-      loginKey: loginKey
+      transports: passkey.attestation.transports.map(\.rawValue)
     )
   }
 

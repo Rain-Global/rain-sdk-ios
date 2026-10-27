@@ -478,17 +478,13 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
   /// rpIds the registration ceremony ran for.
   var registerPasskeyCalls: [String] = []
   var registerPasskeyError: Error?
-  /// The ceremony result; the login key is whatever the controller handed in.
   var stubbedRegistration = PasskeyRegistration(
     challenge: "Y2hhbGxlbmdl", credentialId: "cred-1", clientDataJson: "eyJ0eXBlIjoi",
-    attestationObject: "o2NmbXQ", transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"],
-    loginKey: TemporaryApiKey(publicKey: "unset", privateKey: "unset")
+    attestationObject: "o2NmbXQ", transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
   )
   /// Runs after a passkey login or a signup's key login opened a session — install the new
   /// session / authState here.
   var onPasskeyAuth: (() -> Void)?
-  /// Every registration the ceremony returned (the stub fields plus the controller's key).
-  var registrations: [PasskeyRegistration] = []
 
   var temporaryKeysMade: [TemporaryApiKey] = []
   struct TemporaryKeyLoginCall: Equatable { let organizationId: String; let key: TemporaryApiKey; let sessionKey: String }
@@ -514,16 +510,10 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
     return key
   }
 
-  func registerPasskey(anchor: ASPresentationAnchor, rpId: String, loginKey: TemporaryApiKey) async throws -> PasskeyRegistration {
+  func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
     registerPasskeyCalls.append(rpId)
     if let registerPasskeyError { throw registerPasskeyError }
-    let registration = PasskeyRegistration(
-      challenge: stubbedRegistration.challenge, credentialId: stubbedRegistration.credentialId,
-      clientDataJson: stubbedRegistration.clientDataJson, attestationObject: stubbedRegistration.attestationObject,
-      transports: stubbedRegistration.transports, loginKey: loginKey
-    )
-    registrations.append(registration)
-    return registration
+    return stubbedRegistration
   }
 
   func loginWithTemporaryKey(organizationId: String, key: TemporaryApiKey, sessionKey: String) async throws {

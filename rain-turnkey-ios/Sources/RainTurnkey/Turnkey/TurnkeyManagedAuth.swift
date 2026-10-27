@@ -511,11 +511,12 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   ///
   /// Order matters for what a failure leaves behind: the token is minted before the ceremony so
   /// a host without a backend fails before Face ID. A signup whose outcome is UNKNOWN — timeout,
-  /// transport failure, 5xx, rate limit — keeps the registration and its key (persisted), and
-  /// the next call resends both rather than registering a second passkey: rain-api may have
-  /// created the account past our timeout, and only a resend of the same credential lets it
-  /// record that account. A definitive refusal clears it. A login failure after a successful
-  /// signup leaves an account the same passkey signs into with `loginWithPasskey`.
+  /// transport failure, 5xx, rate limit — keeps the registration (persisted; public material
+  /// only, the login key stays in memory and a resend makes a fresh one), and the next call
+  /// resends it rather than registering a second passkey: rain-api may have created the account
+  /// past our timeout, and only a resend of the same credential lets it record that account. A
+  /// definitive refusal clears it. A login failure after a successful signup leaves an account
+  /// the same passkey signs into with `loginWithPasskey`.
   internal func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try throwIfMisconfigured()
     let rpId = try requirePasskeysConfigured()
@@ -528,9 +529,8 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       registration = pending
       resuming = true
     } else {
-      let loginKey = context.makeTemporaryApiKey()
       do {
-        registration = try await context.registerPasskey(anchor: anchor, rpId: rpId, loginKey: loginKey)
+        registration = try await context.registerPasskey(anchor: anchor, rpId: rpId)
       } catch {
         throw RainError.from(underlying: error)
       }
@@ -539,11 +539,14 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       resuming = false
     }
 
-    let subOrganizationId = try await signUpPasskey(token: token, registration: registration, resuming: resuming)
+    let loginKey = context.makeTemporaryApiKey()
+    let subOrganizationId = try await signUpPasskey(
+      token: token, attestation: registration.apiAttestation(loginKey: loginKey), resuming: resuming
+    )
 
     var sessionOpened = false
     if let subOrganizationId {
-      sessionOpened = try await loginWithSignupKey(registration.loginKey, organizationId: subOrganizationId)
+      sessionOpened = try await loginWithSignupKey(loginKey, organizationId: subOrganizationId)
     }
     if !sessionOpened {
       let previousKey = context.selectedStoredSessionKey
@@ -585,19 +588,19 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   /// only a passkey login can open it.
   private func signUpPasskey(
     token: String,
-    registration: PasskeyRegistration,
+    attestation: RainApiPasskeyAttestation,
     resuming: Bool
   ) async throws -> String? {
     do {
       let signup: RainApiSignup
       do {
-        signup = try await api.signupPasskey(token: token, attestation: registration.apiAttestation)
+        signup = try await api.signupPasskey(token: token, attestation: attestation)
       } catch let error as RainApiAuthError where error.kind == .tokenRejected || Self.isTokenUsed(error) {
         // The user has already done Face ID; giving up would leave a passkey no account knows
         // and make the next try mint a look-alike. Same one-renewal rule as the code flow. A
         // 409 "token already used" (a host that cached its token) is the same situation.
         let renewed = try await mintToken(for: nil)
-        signup = try await api.signupPasskey(token: renewed, attestation: registration.apiAttestation)
+        signup = try await api.signupPasskey(token: renewed, attestation: attestation)
       }
       pendingPasskeySignups.clear()
       return signup.subOrganizationId

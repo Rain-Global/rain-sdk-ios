@@ -658,7 +658,7 @@ struct TurnkeyManagedAuthTests {
     // The body carries the key made for this signup, and the same key opens the session for
     // the account rain-api returned — never a passkey prompt that could pick an old account.
     let key = try #require(turnkey.temporaryKeysMade.first)
-    #expect(h.api.passkeyBodies == [turnkey.registrations[0].apiAttestation])
+    #expect(h.api.passkeyBodies == [turnkey.stubbedRegistration.apiAttestation(loginKey: key)])
     #expect(h.api.passkeyBodies[0].publicKey == key.publicKey)
     #expect(turnkey.temporaryKeyLoginCalls.map(\.organizationId) == ["sub-new"])
     #expect(turnkey.temporaryKeyLoginCalls.map(\.key) == [key])
@@ -765,7 +765,7 @@ struct TurnkeyManagedAuthTests {
       await #expect(throws: RainError.self) {
         try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
       }
-      #expect(h.pendingSignups.registration == turnkey.registrations.first, "\(failure)")
+      #expect(h.pendingSignups.registration == turnkey.stubbedRegistration, "\(failure)")
       #expect(turnkey.temporaryKeyLoginCalls.isEmpty)
       #expect(turnkey.loginWithPasskeyCallCount == 0)
 
@@ -774,13 +774,14 @@ struct TurnkeyManagedAuthTests {
 
       #expect(turnkey.registerPasskeyCalls.count == 1, "\(failure)")
       #expect(h.api.passkeyBodies.count == 2)
-      // The same registration AND the same key: rain-api finds the account by credential, and
-      // the key it attached (if the first try landed) is the one the resend must log in with.
-      #expect(h.api.passkeyBodies[0] == h.api.passkeyBodies[1])
-      #expect(turnkey.temporaryKeysMade.count == 1, "no fresh key for a resend")
+      // The same credential (that is how rain-api finds the account), a fresh key (the private
+      // half is never persisted), and the login uses the key the resend actually sent.
+      #expect(h.api.passkeyBodies[0].attestation == h.api.passkeyBodies[1].attestation)
+      #expect(turnkey.temporaryKeysMade.count == 2)
+      #expect(h.api.passkeyBodies.map(\.publicKey) == turnkey.temporaryKeysMade.map(\.publicKey))
       #expect(h.api.calls.map(\.token) == ["wat-1", "wat-2"])
       #expect(h.pendingSignups.registration == nil, "cleared once the account is known to exist")
-      #expect(turnkey.temporaryKeyLoginCalls.map(\.key) == [turnkey.temporaryKeysMade[0]])
+      #expect(turnkey.temporaryKeyLoginCalls.map(\.key) == [turnkey.temporaryKeysMade[1]])
       #expect(turnkey.loginWithPasskeyCallCount == 0)
     }
   }
@@ -876,27 +877,12 @@ struct TurnkeyManagedAuthTests {
     let store = UserDefaultsPendingPasskeySignupStore(organizationId: "org-a", defaults: defaults)
     let registration = PasskeyRegistration(
       challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao",
-      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"],
-      loginKey: TemporaryApiKey(publicKey: "02pub", privateKey: "priv")
+      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
     )
     #expect(store.load() == nil)
     store.save(registration)
-    #expect(store.load() == registration, "the login key survives too — a resend must send the same one")
+    #expect(store.load() == registration)
     store.clear()
-    #expect(store.load() == nil)
-  }
-
-  @Test("a registration persisted before the login key existed is dropped, not resent without a key")
-  func testUserDefaultsStoreDropsPreKeyRegistration() throws {
-    let suite = "rain-tests-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
-    defer { defaults.removePersistentDomain(forName: suite) }
-    let store = UserDefaultsPendingPasskeySignupStore(organizationId: "org-a", defaults: defaults)
-    let legacy = try JSONSerialization.data(withJSONObject: [
-      "challenge": "c", "credentialId": "id", "clientDataJson": "cd", "attestationObject": "ao",
-      "transports": ["AUTHENTICATOR_TRANSPORT_INTERNAL"],
-    ])
-    defaults.set(legacy, forKey: "\(UserDefaultsPendingPasskeySignupStore.keyPrefix).org-a")
     #expect(store.load() == nil)
   }
 
@@ -909,8 +895,7 @@ struct TurnkeyManagedAuthTests {
     let production = UserDefaultsPendingPasskeySignupStore(organizationId: "org-production", defaults: defaults)
     let registration = PasskeyRegistration(
       challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao",
-      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"],
-      loginKey: TemporaryApiKey(publicKey: "02pub", privateKey: "priv")
+      transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL"]
     )
     sandbox.save(registration)
     #expect(production.load() == nil)
