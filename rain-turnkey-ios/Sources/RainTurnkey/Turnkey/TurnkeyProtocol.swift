@@ -130,10 +130,12 @@ internal protocol TurnkeyContextProtocol: AnyObject {
 
   // MARK: Passkeys (RainWallet)
 
-  /// Signs an existing user in with a passkey assertion. At swift-sdk 4.0.0 the vendor stores
-  /// the resulting session under ITS DEFAULT key — `sessionKey` arguments are accepted but
-  /// ignored — see `TurnkeyManagedAuthController`'s passkey session handling.
-  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws
+  /// Signs an existing user in with a passkey assertion. `organizationId` scopes the stamp:
+  /// nil = the parent org (Turnkey resolves the sub-org from the credential); a sub-org id
+  /// makes any other account's passkey fail instead of signing in. At swift-sdk 4.0.0 the
+  /// vendor stores the resulting session under ITS DEFAULT key — `sessionKey` arguments are
+  /// accepted but ignored — see `TurnkeyManagedAuthController`'s passkey session handling.
+  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor, organizationId: String?) async throws
 
   /// A fresh in-memory P256 pair for one passkey signup (see `TemporaryApiKey`).
   func makeTemporaryApiKey() -> TemporaryApiKey
@@ -324,8 +326,8 @@ extension TurnkeyContext: TurnkeyContextProtocol {
     )
   }
 
-  internal func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws {
-    _ = try await loginWithPasskey(anchor: anchor)
+  internal func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor, organizationId: String?) async throws {
+    _ = try await loginWithPasskey(anchor: anchor, organizationId: organizationId)
   }
 
   internal func makeTemporaryApiKey() -> TemporaryApiKey {

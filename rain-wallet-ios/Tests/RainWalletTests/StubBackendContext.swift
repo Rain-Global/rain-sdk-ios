@@ -71,7 +71,7 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
   var registerPasskeyCalls: [String] = []
   var addPasskeyCalls: [String] = []
 
-  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws {
+  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor, organizationId: String?) async throws {
     loginWithPasskeyCallCount += 1
   }
 

@@ -220,7 +220,10 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   prompt listed every look-alike `passkey-<ts>` for the domain and could sign into an OLD
   account while the SDK reported success). FALLBACK: a failed key login (anything but
   cancellation) stores nothing, so the controller runs the old `loginWithTurnkeyPasskey` path
-  (second prompt) — the only expected cause is rain-api ADOPTING an unsaved account this tenant
+  (second prompt) SCOPED to the signup's sub-org (`loginWithTurnkeyPasskey(anchor:organizationId:)`
+  → vendor `loginWithPasskey(anchor:organizationId:)`, which stamps `stamp_login` on that org, so
+  a look-alike passkey from another account FAILS instead of signing in — review H5, Android
+  passes it too; normal `loginWithPasskey` passes nil = parent org) — the only expected cause is rain-api ADOPTING an unsaved account this tenant
   created earlier (no key attached; the response is identical `{subOrganizationId}`, so the
   device cannot tell — backend ask: a `sessionKeyAttached: false` flag) or the 60 s passing. A
   resend answered 409 "already has a wallet" returns no sub-org id → passkey login. A resend

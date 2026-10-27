@@ -474,6 +474,8 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
   static let passkeyDefaultSessionKey = "com.turnkey.sdk.session"
 
   var loginWithPasskeyCallCount = 0
+  /// The organization each passkey login was scoped to (nil = parent org).
+  var loginWithPasskeyOrganizationIds: [String?] = []
   var loginWithPasskeyError: Error?
   /// rpIds the registration ceremony ran for.
   var registerPasskeyCalls: [String] = []
@@ -495,8 +497,9 @@ final class MockTurnkey: TurnkeyContextProtocol, @unchecked Sendable {
   var addPasskeyCalls: [String] = [] // rpIds
   var addPasskeyError: Error?
 
-  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws {
+  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor, organizationId: String?) async throws {
     loginWithPasskeyCallCount += 1
+    loginWithPasskeyOrganizationIds.append(organizationId)
     if let loginWithPasskeyError { throw loginWithPasskeyError }
     try storePasskeySession()
   }

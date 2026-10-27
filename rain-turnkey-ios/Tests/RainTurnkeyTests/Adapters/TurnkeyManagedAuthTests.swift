@@ -561,7 +561,8 @@ struct TurnkeyManagedAuthTests {
 
     try await controller.loginWithPasskey(anchor: ASPresentationAnchor())
 
-    #expect(turnkey.loginWithPasskeyCallCount == 1)
+    // Parent-org scope: Turnkey resolves the sub-org from the credential.
+    #expect(turnkey.loginWithPasskeyOrganizationIds == [nil])
     // Nothing was selected, so the vendor auto-selected — no explicit activation.
     #expect(turnkey.selectStoredSessionCalls.isEmpty)
     #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
@@ -684,11 +685,14 @@ struct TurnkeyManagedAuthTests {
     }
     turnkey.temporaryKeyLoginError = TurnkeyRequestError.apiError(statusCode: 401, payload: nil)
     let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
+    h.api.nextSubOrganizationId = "sub-adopted"
 
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
 
     #expect(turnkey.temporaryKeyLoginCalls.count == 1)
-    #expect(turnkey.loginWithPasskeyCallCount == 1)
+    // Scoped to the signup's account: an older look-alike passkey picked in the prompt fails
+    // instead of signing into its own account.
+    #expect(turnkey.loginWithPasskeyOrganizationIds == ["sub-adopted"])
     #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
     // The failed key login stored nothing, so there was no attempt key to clean up.
     #expect(turnkey.storeSessionCalls.isEmpty)
@@ -798,9 +802,10 @@ struct TurnkeyManagedAuthTests {
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
 
     #expect(turnkey.registerPasskeyCalls.isEmpty)
-    // A saved account comes back without a sub-organization id, so only the passkey can open it.
+    // A saved account comes back without a sub-organization id, so only the passkey can open
+    // it, and the login is scoped to the parent org like any other passkey login.
     #expect(turnkey.temporaryKeyLoginCalls.isEmpty)
-    #expect(turnkey.loginWithPasskeyCallCount == 1)
+    #expect(turnkey.loginWithPasskeyOrganizationIds == [nil])
     #expect(h.pendingSignups.registration == nil)
     #expect(h.controller.hasActiveSession())
   }

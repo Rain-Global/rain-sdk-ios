@@ -482,7 +482,7 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     let previousKey = context.selectedStoredSessionKey
     preparePasskeyDefaultKey()
     do {
-      try await context.loginWithTurnkeyPasskey(anchor: anchor)
+      try await context.loginWithTurnkeyPasskey(anchor: anchor, organizationId: nil)
     } catch {
       // Nothing was stored or cleared beyond a stale unselected key — a live session stays live.
       throw RainError.from(underlying: error)
@@ -549,10 +549,12 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       sessionOpened = try await loginWithSignupKey(loginKey, organizationId: subOrganizationId)
     }
     if !sessionOpened {
+      // Scoped to the signup's account when known, so an older look-alike passkey picked in the
+      // prompt fails rather than signing into its own account.
       let previousKey = context.selectedStoredSessionKey
       preparePasskeyDefaultKey()
       do {
-        try await context.loginWithTurnkeyPasskey(anchor: anchor)
+        try await context.loginWithTurnkeyPasskey(anchor: anchor, organizationId: subOrganizationId)
       } catch {
         throw RainError.from(underlying: error)
       }
