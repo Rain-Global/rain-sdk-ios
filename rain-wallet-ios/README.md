@@ -58,9 +58,9 @@ Configure expiry/refresh/retry behavior via `RainWalletConfig.sessionPolicy`
 throws `invalidConfig` while any session is live, so a double tap can't mint one either. It
 needs a contact-less wallet auth token, so your `authTokenProvider` is called with `nil`. One
 biometric prompt registers the passkey; the session is then opened with a short-lived key the
-backend attaches to the new account, so it always belongs to the account just created. (A
-second prompt appears only in one rare case: the backend recovered an account from an earlier
-interrupted attempt rather than creating one.) If the signup's outcome is unknown (a timeout, a
+backend attaches to the new account. A second prompt appears only when that key cannot open the
+session — the backend recovered an earlier interrupted attempt, the key expired, or the request
+failed — and it is addressed to the account the backend returned, so it opens no other. If the signup's outcome is unknown (a timeout, a
 backend error), the SDK keeps the registered passkey and the next `signUpWithPasskey` call
 resends it without a new prompt — never register a second one yourself. A `providerError` whose message says the signup is still in progress means the
 backend is finishing the earlier attempt: ask the user to try again in a couple of minutes;
