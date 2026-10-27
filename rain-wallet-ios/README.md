@@ -74,6 +74,9 @@ A passkey-created account can attach a verified email or phone with
 `sendContactVerificationCode(to:)` + `confirmContactVerification(_:)`, after which that contact
 is a login method too. SMS login requires SMS auth enabled on the wallet backend. Accounts are
 never merged: attaching a contact adds a login method to THIS account; it never moves wallets.
+If the contact is already the login for another wallet in your app, the attach is refused with
+`unauthorized` (RAIN_202) once the code is confirmed — tell the user to sign in with that
+contact instead. Re-attaching a contact the account already has is fine.
 
 ## Key export
 

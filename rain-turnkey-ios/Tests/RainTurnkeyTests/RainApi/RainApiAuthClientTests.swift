@@ -75,6 +75,23 @@ struct RainApiAuthClientTests {
     }
   }
 
+  @Test("/otp/verify reports the contact's saved wallet when there is one, and decodes without the field on older backends")
+  func verifyReportsSavedWallet() async throws {
+    let recorder = Recorder()
+    recorder.answers = [
+      (200, #"{"verificationToken":"vt","walletSubOrganizationId":"sub-7"}"#),
+      (200, #"{"verificationToken":"vt","walletSubOrganizationId":null}"#),
+      (200, #"{"verificationToken":"vt"}"#),
+    ]
+    let c = client(recorder)
+    let owned = try await c.verifyOtp(token: "wat", otpId: "o", encryptedOtpBundle: "e")
+    let free = try await c.verifyOtp(token: "wat", otpId: "o", encryptedOtpBundle: "e")
+    let legacy = try await c.verifyOtp(token: "wat", otpId: "o", encryptedOtpBundle: "e")
+    #expect(owned.walletSubOrganizationId == "sub-7")
+    #expect(free.walletSubOrganizationId == nil)
+    #expect(legacy.walletSubOrganizationId == nil)
+  }
+
   @Test("the client signature is encoded in the vendor's v1ClientSignature shape")
   func clientSignatureShape() async throws {
     let recorder = Recorder()

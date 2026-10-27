@@ -194,7 +194,17 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   only) → /signup → /login again with subOrganizationId, same token + verification token.
   `.tokenRejected` mid-flow → ONE renewal from the host (`withTokenRetry`). Contact attach =
   token for the NEW contact → init/verify → vendor `updateUserEmail/Phone` with rain-api's
-  verification token. `TurnkeyConfig` managed init requires `authBackend:
+  verification token. OWNERSHIP CHECK (2026-10-26, branch
+  volo/feature/refuse-contact-attach-to-other-wallet): `/otp/verify` also returns
+  `walletSubOrganizationId: String?` — the wallet this tenant has SAVED for the token's contact
+  (looked up only after the code verified, so the caller already proved they own the contact);
+  `confirmContactVerification` throws `unauthorized` RAIN_202 and drops the challenge when it
+  is set and ≠ `session.organizationId` (the id, not a Bool, so re-attaching one's own contact
+  still works). Without it the attach went through, rain-api then found TWO wallets for the
+  contact and every code login 500'd (`findSavedSubOrg`), and the vendor update REPLACES the
+  account's existing email, so both wallets could lose code login. The pre-rain-api SDK asked
+  the Auth Proxy; Android's cutover (#77) dropped the check — flag for parity (same field).
+  Login (`confirmLoginCode`) ignores the field. `TurnkeyConfig` managed init requires `authBackend:
   TurnkeyManagedAuthBackend(baseURL:tokenProvider:)` (SPI). `invalidateExisting` is GONE: a
   second device no longer logs the first out (test plan B7 now expects success — backend ask).
   PR H3 (DONE 2026-10-22, #47): passkey SIGNUP

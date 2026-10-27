@@ -22,6 +22,11 @@ internal struct RainApiOtpChallenge: Equatable, Decodable, Sendable {
 internal struct RainApiVerification: Equatable, Decodable, Sendable {
   /// Turnkey verification token (JWT, 10 min). Carries the public key the code was encrypted to.
   let verificationToken: String
+  /// The wallet this tenant has already saved for the token's contact, if any. Returned only
+  /// once the code is verified, i.e. once the caller has proved they control the contact. Lets
+  /// a contact attach refuse to take over another wallet's login (optional: absent on rain-api
+  /// builds predating it).
+  let walletSubOrganizationId: String?
 }
 
 internal struct RainApiSignup: Equatable, Decodable, Sendable {

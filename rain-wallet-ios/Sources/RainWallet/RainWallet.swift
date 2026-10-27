@@ -421,7 +421,9 @@ public struct RainProvider: ProviderDescriptor {
   }
 
   /// Confirms the code from ``sendContactVerificationCode(to:)`` and attaches the contact,
-  /// verified. A wrong code throws `RainError.invalidLoginCode` — re-prompt and retry.
+  /// verified. A wrong code throws `RainError.invalidLoginCode` — re-prompt and retry. A
+  /// contact that is already another wallet's login in this app throws
+  /// `RainError.unauthorized` (RAIN_202) and ends the attempt — steer the user to sign in with it.
   public func confirmContactVerification(_ code: String) async throws {
     try requireOpen()
     try await backing.confirmContactVerification(code)
