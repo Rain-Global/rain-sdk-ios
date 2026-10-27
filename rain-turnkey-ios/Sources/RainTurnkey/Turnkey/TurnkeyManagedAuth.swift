@@ -502,7 +502,7 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   /// only on the account the signup created, so the session can only be for that account — a
   /// passkey prompt here would list the user's earlier look-alike passkeys for this domain and
   /// could sign them into an old account. Returning users must use `loginWithPasskey` (or a
-  /// login code): every call here mints a fresh account.
+  /// login code): every call here mints a fresh account, so it is refused over any live session.
   ///
   /// The key login falls back to the vendor's passkey login (a second prompt) when rain-api
   /// attached no key: it adopted an account this tenant created earlier but never saved, or
@@ -520,7 +520,12 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
   internal func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try throwIfMisconfigured()
     let rpId = try requirePasskeysConfigured()
-    try await refuseIfLivePasskeySession()
+    // Over ANY live session — code, passkey or a fresh signup's attempt key — a second tap or a
+    // host retry would mint an empty second account and replace the session. Same as Android.
+    if hasActiveSession() {
+      throw RainError.invalidConfig(details: "Already signed in; log out before creating a new account")
+    }
+    try await refuseIfLivePasskeySession() // purges an expired default-key session
     let token = try await mintToken(for: nil)
 
     let registration: PasskeyRegistration

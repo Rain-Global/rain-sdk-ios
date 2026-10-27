@@ -945,35 +945,40 @@ struct TurnkeyManagedAuthTests {
   }
 
   @MainActor
-  @Test("passkey signup over a live OTP session activates the new attempt key and drops the old one")
-  func testPasskeySignupOverLiveOtpSession() async throws {
+  @Test("passkey signup over a live code session is refused before Face ID: it would mint a second account")
+  func testPasskeySignupOverLiveOtpSessionRefused() async throws {
     let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: MockTurnkey.defaultSession())
-    let previousKey = try #require(turnkey.selectedStoredSessionKey)
-    turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
     let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
 
-    try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
-
-    let attemptKey = try #require(turnkey.temporaryKeyLoginCalls.first?.sessionKey)
-    #expect(turnkey.selectStoredSessionCalls == [attemptKey])
-    #expect(turnkey.clearStoredSessionCalls == [previousKey])
-    #expect(turnkey.selectedStoredSessionKey == attemptKey)
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(h.tokenRequests.isEmpty)
+    #expect(turnkey.registerPasskeyCalls.isEmpty)
+    #expect(turnkey.clearStoredSessionCalls.isEmpty, "the live session is untouched")
   }
 
   @MainActor
-  @Test("the passkey-login fallback over a live OTP session still uses the vendor's default key dance")
-  func testPasskeySignupFallbackOverLiveOtpSession() async throws {
-    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: MockTurnkey.defaultSession())
-    let previousKey = try #require(turnkey.selectedStoredSessionKey)
-    turnkey.onPasskeyAuth = { turnkey.session = MockTurnkey.defaultSession() }
-    turnkey.temporaryKeyLoginError = TurnkeyRequestError.apiError(statusCode: 401, payload: nil)
+  @Test("a second signUpWithPasskey right after a key-path signup is refused — a double tap must not mint a second account")
+  func testPasskeySignupTwiceRefusesTheSecond() async throws {
+    let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet()], session: nil)
+    turnkey.onPasskeyAuth = {
+      turnkey.session = MockTurnkey.defaultSession()
+      turnkey.authState = .authenticated
+    }
     let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
 
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    // The session lives under an attempt key, not the vendor's default key — the refusal must
+    // not depend on which key holds it.
+    #expect(turnkey.selectedStoredSessionKey != MockTurnkey.passkeyDefaultSessionKey)
 
-    #expect(turnkey.selectStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey])
-    #expect(turnkey.clearStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey, previousKey])
-    #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
+    await #expect(throws: RainError.invalidConfig(details: "")) {
+      try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
+    }
+    #expect(turnkey.registerPasskeyCalls.count == 1)
+    #expect(h.api.passkeyBodies.count == 1)
+    #expect(h.controller.hasActiveSession())
   }
 
   @MainActor

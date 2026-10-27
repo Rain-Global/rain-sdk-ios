@@ -228,8 +228,12 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   device cannot tell — backend ask: a `sessionKeyAttached: false` flag) or the 60 s passing. A
   resend answered 409 "already has a wallet" returns no sub-org id → passkey login. A resend
   whose first try DID land is answered by the adopt path (no key) → passkey login too, so
-  reusing the key across a resend would buy nothing. Android: same change once its passkey
-  signup is on rain-api.
+  reusing the key across a resend would buy nothing. `signUpWithPasskey` is REFUSED over ANY
+  live session (`hasActiveSession()` → invalidConfig, review H5: the attempt-key store slipped
+  past `refuseIfLivePasskeySession`, which only sees the vendor's default key, so a double tap
+  after a key-path signup minted an empty second account; Android refuses the same way;
+  `refuseIfLivePasskeySession` stays for its expired-default-key purge). Android: same change
+  once its passkey signup is on rain-api.
   `signUpWithTurnkeyPasskey` (vendor proxy signup + customWallet) is GONE;
   `addPasskeyAuthenticator` unchanged. UNKNOWN-OUTCOME RULE (review #47): rain-api keeps
   creating the account past our timeout and only RECORDS a lost account when the SAME credential

@@ -54,7 +54,8 @@ Configure expiry/refresh/retry behavior via `RainWalletConfig.sessionPolicy`
 ## Passkeys and login contacts
 
 `signUpWithPasskey(anchor:)` creates a NEW account (fresh wallet — returning users must use
-`loginWithPasskey(anchor:)` or a login code, or they end up with a second, empty account). It
+`loginWithPasskey(anchor:)` or a login code, or they end up with a second, empty account), and
+throws `invalidConfig` while any session is live, so a double tap can't mint one either. It
 needs a contact-less wallet auth token, so your `authTokenProvider` is called with `nil`. One
 biometric prompt registers the passkey; the session is then opened with a short-lived key the
 backend attaches to the new account, so it always belongs to the account just created. (A
