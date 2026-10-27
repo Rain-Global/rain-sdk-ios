@@ -99,10 +99,11 @@ struct RainApiAuthClientTests {
     attestation: .init(
       credentialId: "cred-1", clientDataJson: "eyJ0eXBlIjoi", attestationObject: "o2NmbXQ",
       transports: ["AUTHENTICATOR_TRANSPORT_INTERNAL", "AUTHENTICATOR_TRANSPORT_HYBRID"]
-    )
+    ),
+    publicKey: "02a1b2c3"
   )
 
-  @Test("the passkey attestation is an object with exactly the four fields rain-api validates")
+  @Test("the passkey signup body is the challenge, the four-field attestation object and the device's login key")
   func passkeyAttestationShape() async throws {
     let recorder = Recorder()
     recorder.answers = [(200, #"{"subOrganizationId":"sub-2"}"#)]
@@ -117,7 +118,8 @@ struct RainApiAuthClientTests {
     #expect(attestation?["transports"] as? [String] == ["AUTHENTICATOR_TRANSPORT_INTERNAL", "AUTHENTICATOR_TRANSPORT_HYBRID"])
     // rain-api rejects unknown keys, so nothing else may ride along.
     #expect(Set(attestation?.keys.map { $0 } ?? []) == ["credentialId", "clientDataJson", "attestationObject", "transports"])
-    #expect(Set(body.keys) == ["challenge", "attestation"])
+    #expect(body["publicKey"] as? String == "02a1b2c3")
+    #expect(Set(body.keys) == ["challenge", "attestation", "publicKey"])
   }
 
   @Test("login without a sub-organization id omits the key rather than sending null")
