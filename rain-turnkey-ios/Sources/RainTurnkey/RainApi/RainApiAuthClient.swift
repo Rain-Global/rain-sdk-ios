@@ -63,9 +63,11 @@ internal struct RainApiClientSignature: Equatable, Encodable, Sendable {
   }
 }
 
-/// What the passkey ceremony produced, for `/signup/passkey`. `attestation` is an object —
-/// rain-api validates exactly these four fields (`types.ts`) and rejects anything else — and
-/// matches the vendor's `v1Attestation`, so the ceremony result maps field for field.
+/// The body of `/signup/passkey`. `attestation` is an object — rain-api validates exactly these
+/// four fields (`types.ts`) and rejects anything else — and matches the vendor's
+/// `v1Attestation`, so the ceremony result maps field for field. `publicKey` is the device's
+/// temporary login key (compressed P256, hex); rain-api attaches it to the new account as a
+/// 60-second API key.
 internal struct RainApiPasskeyAttestation: Equatable, Encodable, Sendable {
   struct Attestation: Equatable, Encodable, Sendable {
     let credentialId: String
@@ -77,6 +79,7 @@ internal struct RainApiPasskeyAttestation: Equatable, Encodable, Sendable {
 
   let challenge: String
   let attestation: Attestation
+  let publicKey: String
 }
 
 // MARK: - Errors

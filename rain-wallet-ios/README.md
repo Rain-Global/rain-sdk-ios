@@ -54,12 +54,15 @@ Configure expiry/refresh/retry behavior via `RainWalletConfig.sessionPolicy`
 ## Passkeys and login contacts
 
 `signUpWithPasskey(anchor:)` creates a NEW account (fresh wallet — returning users must use
-`loginWithPasskey(anchor:)` or a login code, or they end up with a second, empty account). It
-needs a contact-less wallet auth token, so your `authTokenProvider` is called with `nil`; expect
-two biometric prompts — one to register the passkey, one to sign in with it. If the signup's
-outcome is unknown (a timeout, a backend error), the SDK keeps the registered passkey and the
-next `signUpWithPasskey` call resends it without a new prompt — never register a second one
-yourself. A `providerError` whose message says the signup is still in progress means the
+`loginWithPasskey(anchor:)` or a login code, or they end up with a second, empty account), and
+throws `invalidConfig` while any session is live, so a double tap can't mint one either. It
+needs a contact-less wallet auth token, so your `authTokenProvider` is called with `nil`. One
+biometric prompt registers the passkey; the session is then opened with a short-lived key the
+backend attaches to the new account. A second prompt appears only when that key cannot open the
+session — the backend recovered an earlier interrupted attempt, the key expired, or the request
+failed — and it is addressed to the account the backend returned, so it opens no other. If the signup's outcome is unknown (a timeout, a
+backend error), the SDK keeps the registered passkey and the next `signUpWithPasskey` call
+resends it without a new prompt — never register a second one yourself. A `providerError` whose message says the signup is still in progress means the
 backend is finishing the earlier attempt: ask the user to try again in a couple of minutes;
 `addPasskey(anchor:)` registers a passkey on the current account so the next login can skip the
 code. Passkeys use YOUR domain: set `RainWalletConfig(passkeyDomain:)` to a web domain you

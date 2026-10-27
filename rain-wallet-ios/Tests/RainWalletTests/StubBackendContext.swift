@@ -71,8 +71,12 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
   var registerPasskeyCalls: [String] = []
   var addPasskeyCalls: [String] = []
 
-  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor) async throws {
+  func loginWithTurnkeyPasskey(anchor: ASPresentationAnchor, organizationId: String?) async throws {
     loginWithPasskeyCallCount += 1
+  }
+
+  func makeTemporaryApiKey() -> TemporaryApiKey {
+    TemporaryApiKey(publicKey: "02stub", privateKey: "stub")
   }
 
   func registerPasskey(anchor: ASPresentationAnchor, rpId: String) async throws -> PasskeyRegistration {
@@ -81,6 +85,8 @@ final class StubBackendContext: TurnkeyContextProtocol, @unchecked Sendable {
       challenge: "c", credentialId: "id", clientDataJson: "cd", attestationObject: "ao", transports: []
     )
   }
+
+  func loginWithTemporaryKey(organizationId: String, key: TemporaryApiKey, sessionKey: String) async throws {}
 
   func addPasskeyAuthenticator(anchor: ASPresentationAnchor, rpId: String) async throws {
     addPasskeyCalls.append(rpId)

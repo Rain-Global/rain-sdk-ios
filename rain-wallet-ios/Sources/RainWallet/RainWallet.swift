@@ -390,9 +390,13 @@ public struct RainProvider: ProviderDescriptor {
 
   /// Creates a NEW account with a passkey; one wallet with EVM + Solana accounts is provisioned
   /// atomically. Every call mints a fresh account — returning users must use
-  /// ``loginWithPasskey(anchor:)`` (or a login code), or they end up with a second, empty wallet.
+  /// ``loginWithPasskey(anchor:)`` (or a login code), or they end up with a second, empty wallet
+  /// — so it throws `RainError.invalidConfig` while any session is live; log out first.
   /// Asks ``RainWalletConfig/authTokenProvider`` for a contact-less token (`nil` contact) and
-  /// shows two biometric prompts: registration, then sign-in.
+  /// shows one biometric prompt, for the registration; the session is opened with a short-lived
+  /// key the backend attaches to the new account. A second prompt appears only when that key
+  /// cannot open the session (the backend recovered an earlier attempt, the key expired, or the
+  /// request failed); it is addressed to the account the backend returned, so it opens no other.
   public func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try requireOpen()
     try await backing.signUpWithPasskey(anchor: anchor)
