@@ -495,33 +495,23 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
     }
   }
 
-  /// Creates a NEW account with a passkey, one biometric prompt: the registration ceremony, then
-  /// rain-api's `/signup/passkey` on a contact-less wallet auth token (rain-api provisions one
-  /// seed with both chain-family accounts and attaches the device's temporary key to the new
-  /// account as a 60-second API key), then a session stamped with that key. The key exists
-  /// only on the account the signup created, so the session can only be for that account — a
-  /// passkey prompt here would list the user's earlier look-alike passkeys for this domain and
-  /// could sign them into an old account. Returning users must use `loginWithPasskey` (or a
-  /// login code): every call here mints a fresh account, so it is refused over any live session.
+  /// Creates a NEW account with a passkey: the registration ceremony (one biometric prompt),
+  /// `/signup/passkey` on a contact-less wallet auth token, then a session stamped with the
+  /// temporary key rain-api attached to the new account. When that key cannot open the session
+  /// (rain-api adopted an earlier unsaved attempt and attached none, the 60 s passed, or the
+  /// stamp failed) the vendor's passkey login runs instead, scoped to the returned account.
+  /// Refused over any live session; returning users use `loginWithPasskey` or a login code.
   ///
-  /// The key login falls back to the vendor's passkey login (a second prompt) when rain-api
-  /// attached no key: it adopted an account this tenant created earlier but never saved, or
-  /// the 60 s passed. A failed key login stores nothing, so the fallback is what every signup
-  /// did before.
-  ///
-  /// Order matters for what a failure leaves behind: the token is minted before the ceremony so
-  /// a host without a backend fails before Face ID. A signup whose outcome is UNKNOWN — timeout,
-  /// transport failure, 5xx, rate limit — keeps the registration (persisted; public material
-  /// only, the login key stays in memory and a resend makes a fresh one), and the next call
-  /// resends it rather than registering a second passkey: rain-api may have created the account
-  /// past our timeout, and only a resend of the same credential lets it record that account. A
+  /// Failure residue: the token is minted before the ceremony, so a host without a backend
+  /// fails before Face ID. An unknown signup outcome (timeout, transport, 5xx, 429) keeps the
+  /// persisted registration and the next call resends it — rain-api may have created the
+  /// account past our timeout and records it only on a resend of the same credential. A
   /// definitive refusal clears it. A login failure after a successful signup leaves an account
-  /// the same passkey signs into with `loginWithPasskey`.
+  /// the same passkey opens with `loginWithPasskey`.
   internal func signUpWithPasskey(anchor: ASPresentationAnchor) async throws {
     try throwIfMisconfigured()
     let rpId = try requirePasskeysConfigured()
-    // Over ANY live session — code, passkey or a fresh signup's attempt key — a second tap or a
-    // host retry would mint an empty second account and replace the session. Same as Android.
+    // A second tap or host retry would otherwise mint an empty second account.
     if hasActiveSession() {
       throw RainError.invalidConfig(details: "Already signed in; log out before creating a new account")
     }
@@ -554,8 +544,6 @@ internal final class TurnkeyManagedAuthController: @unchecked Sendable {
       sessionOpened = try await loginWithSignupKey(loginKey, organizationId: subOrganizationId)
     }
     if !sessionOpened {
-      // Scoped to the signup's account when known, so an older look-alike passkey picked in the
-      // prompt fails rather than signing into its own account.
       let previousKey = context.selectedStoredSessionKey
       preparePasskeyDefaultKey()
       do {

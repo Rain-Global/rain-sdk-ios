@@ -561,7 +561,6 @@ struct TurnkeyManagedAuthTests {
 
     try await controller.loginWithPasskey(anchor: ASPresentationAnchor())
 
-    // Parent-org scope: Turnkey resolves the sub-org from the credential.
     #expect(turnkey.loginWithPasskeyOrganizationIds == [nil])
     // Nothing was selected, so the vendor auto-selected — no explicit activation.
     #expect(turnkey.selectStoredSessionCalls.isEmpty)
@@ -656,15 +655,12 @@ struct TurnkeyManagedAuthTests {
     #expect(h.tokenRequests == [nil])
     #expect(turnkey.registerPasskeyCalls == ["passkeys.rain.xyz"])
     #expect(h.api.calls == [.init(endpoint: .signupPasskey, token: "wat-1")])
-    // The body carries the key made for this signup, and the same key opens the session for
-    // the account rain-api returned — never a passkey prompt that could pick an old account.
     let key = try #require(turnkey.temporaryKeysMade.first)
     #expect(h.api.passkeyBodies == [turnkey.stubbedRegistration.apiAttestation(loginKey: key)])
     #expect(h.api.passkeyBodies[0].publicKey == key.publicKey)
     #expect(turnkey.temporaryKeyLoginCalls.map(\.organizationId) == ["sub-new"])
     #expect(turnkey.temporaryKeyLoginCalls.map(\.key) == [key])
     #expect(turnkey.loginWithPasskeyCallCount == 0)
-    // Stored under a per-attempt key like the code flow; auto-selected, nothing to purge.
     let attemptKey = try #require(turnkey.temporaryKeyLoginCalls.first?.sessionKey)
     #expect(attemptKey.hasPrefix("rain-turnkey-"))
     #expect(turnkey.selectedStoredSessionKey == attemptKey)
@@ -690,11 +686,8 @@ struct TurnkeyManagedAuthTests {
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
 
     #expect(turnkey.temporaryKeyLoginCalls.count == 1)
-    // Scoped to the signup's account: an older look-alike passkey picked in the prompt fails
-    // instead of signing into its own account.
     #expect(turnkey.loginWithPasskeyOrganizationIds == ["sub-adopted"])
     #expect(turnkey.selectedStoredSessionKey == MockTurnkey.passkeyDefaultSessionKey)
-    // The failed key login stored nothing, so there was no attempt key to clean up.
     #expect(turnkey.storeSessionCalls.isEmpty)
     #expect(turnkey.clearStoredSessionCalls == [MockTurnkey.passkeyDefaultSessionKey])
     #expect(h.pendingSignups.registration == nil)
@@ -778,8 +771,6 @@ struct TurnkeyManagedAuthTests {
 
       #expect(turnkey.registerPasskeyCalls.count == 1, "\(failure)")
       #expect(h.api.passkeyBodies.count == 2)
-      // The same credential (that is how rain-api finds the account), a fresh key (the private
-      // half is never persisted), and the login uses the key the resend actually sent.
       #expect(h.api.passkeyBodies[0].attestation == h.api.passkeyBodies[1].attestation)
       #expect(turnkey.temporaryKeysMade.count == 2)
       #expect(h.api.passkeyBodies.map(\.publicKey) == turnkey.temporaryKeysMade.map(\.publicKey))
@@ -802,8 +793,6 @@ struct TurnkeyManagedAuthTests {
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
 
     #expect(turnkey.registerPasskeyCalls.isEmpty)
-    // A saved account comes back without a sub-organization id, so only the passkey can open
-    // it, and the login is scoped to the parent org like any other passkey login.
     #expect(turnkey.temporaryKeyLoginCalls.isEmpty)
     #expect(turnkey.loginWithPasskeyOrganizationIds == [nil])
     #expect(h.pendingSignups.registration == nil)
@@ -969,8 +958,6 @@ struct TurnkeyManagedAuthTests {
     let h = Harness(turnkey: turnkey, rpId: "passkeys.rain.xyz")
 
     try await h.controller.signUpWithPasskey(anchor: ASPresentationAnchor())
-    // The session lives under an attempt key, not the vendor's default key — the refusal must
-    // not depend on which key holds it.
     #expect(turnkey.selectedStoredSessionKey != MockTurnkey.passkeyDefaultSessionKey)
 
     await #expect(throws: RainError.invalidConfig(details: "")) {

@@ -356,9 +356,7 @@ extension TurnkeyContext: TurnkeyContextProtocol {
     key: TemporaryApiKey,
     sessionKey: String
   ) async throws {
-    // Mirrors the vendor's own proxy-era `signUpWithPasskey` (swift-sdk 4.0.0,
-    // TurnkeyContext+Passkey.swift). `baseUrl` defaults to the host the context uses. 900 s
-    // matches the sessions rain-api's `/login` issues.
+    // `baseUrl` defaults to the host the context uses. 900 s matches rain-api's `/login` sessions.
     let temporaryClient = TurnkeyClient(
       apiPrivateKey: key.privateKey,
       apiPublicKey: key.publicKey,
