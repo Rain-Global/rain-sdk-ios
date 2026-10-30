@@ -487,6 +487,7 @@ struct TurnkeySolanaTests {
       destination
     ])
     MockURLProtocol.stub(method: "getBalance", result: ["value": 1_000_000_000]) // 1 SOL for fees
+    MockURLProtocol.stub(method: "getMinimumBalanceForRentExemption", result: 1_488_440)
     MockURLProtocol.stub(method: "getLatestBlockhash", result: ["value": ["blockhash": blockhash]])
     MockURLProtocol.stub(method: "simulateTransaction", result: ["value": ["err": NSNull(), "logs": []]])
   }
@@ -559,6 +560,57 @@ struct TurnkeySolanaTests {
 
       #expect(client.solSendTransactionCalls[0].unsignedTransaction == (try expectedTransfer(
         amount: 1_000_000, decimals: 6, createDestination: true)))
+    }
+  }
+
+  @Test("a sponsored-rent send from a zero-SOL wallet creates the recipient's account without reading balance or rent, and the bytes are the self-paid bytes")
+  func splSendSponsoredRentFromZeroSolWallet() async throws {
+    let turnkey = dualCurveTurnkey()
+    let client = turnkey.turnkeyClient as! MockTurnkeyClient
+    client.sendTransactionStatusQueue = [.solanaIncluded(signature: "spl-sig-rent")]
+
+    try await MockURLProtocol.withInstalled {
+      MockURLProtocol.interceptedHosts = [Self.host]
+      stubComposerReads(destinationExists: false)
+      MockURLProtocol.stub(method: "getBalance", result: ["value": 0])
+      MockURLProtocol.stubError(method: "getMinimumBalanceForRentExemption", error: URLError(.badServerResponse))
+      let (manager, _, _) = TestManagers.turnkeyManager(
+        turnkey: turnkey, configs: configs(), sponsorGas: true, sponsorRent: true
+      )
+
+      _ = try await manager.sendToken(
+        chainId: Self.chainId, contractAddress: Self.mint, to: recipient, amount: 1, decimals: nil)
+
+      #expect(!MockURLProtocol.recordedMethods.contains("getBalance"))
+      #expect(!MockURLProtocol.recordedMethods.contains("getMinimumBalanceForRentExemption"))
+      #expect(!MockURLProtocol.recordedMethods.contains("simulateTransaction"))
+      #expect(client.solSendTransactionCalls[0].sponsor == true)
+      #expect(client.solSendTransactionCalls[0].unsignedTransaction == (try expectedTransfer(
+        amount: 1_000_000, decimals: 6, createDestination: true)))
+    }
+  }
+
+  @Test("with gas sponsored but not rent, a zero-SOL wallet is still refused the rent up front")
+  func splSendGasOnlyStillDemandsRent() async throws {
+    let turnkey = dualCurveTurnkey()
+    let client = turnkey.turnkeyClient as! MockTurnkeyClient
+
+    try await MockURLProtocol.withInstalled {
+      MockURLProtocol.interceptedHosts = [Self.host]
+      stubComposerReads(destinationExists: false)
+      MockURLProtocol.stub(method: "getBalance", result: ["value": 0])
+      let (manager, _, _) = TestManagers.turnkeyManager(turnkey: turnkey, configs: configs(), sponsorGas: true)
+
+      let error = await #expect(throws: RainError.self) {
+        _ = try await manager.sendToken(
+          chainId: Self.chainId, contractAddress: Self.mint, to: recipient, amount: 1, decimals: nil)
+      }
+      guard case .insufficientFunds(let required, _) = error else {
+        Issue.record("expected insufficientFunds, got \(String(describing: error))")
+        return
+      }
+      #expect(required == "0.00148844", "the rent alone: the fee is sponsored")
+      #expect(client.solSendTransactionCalls.isEmpty)
     }
   }
 

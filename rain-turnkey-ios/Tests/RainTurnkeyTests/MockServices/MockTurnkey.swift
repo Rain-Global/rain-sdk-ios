@@ -48,6 +48,18 @@ final class MockTurnkeyClient: TurnkeyClientProtocol {
       )
     }
 
+    static func solanaLamportShortfall(
+      transactionErrorJson: String? = nil,
+      logs: [String] = []
+    ) -> StatusFixture {
+      StatusFixture(
+        txHash: nil, txStatus: "TX_STATUS_FAILED", errorMessage: "Transaction simulation failed",
+        solanaFailure: v1SolanaFailureDetails(
+          logs: logs, rpcMessage: "Transaction simulation failed", transactionErrorJson: transactionErrorJson
+        )
+      )
+    }
+
     /// Solana submission Included on-chain, carrying the signature in the status response.
     static func solanaIncluded(signature: String) -> StatusFixture {
       StatusFixture(txStatus: "TX_STATUS_INCLUDED", solanaSignature: signature)

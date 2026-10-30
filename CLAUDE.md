@@ -3,7 +3,14 @@
 ## Git
 - Never commit or push changes unless explicitly asked.
 - Commit messages: single line only, no body. No conventional-commit prefixes (no `feat:`/`fix(scope):`). Always start with a capital letter.
-- PR descriptions: human voice — first person, plain sentences, brief; cover the substance without exhaustive bullet inventories or marketing polish.
+- PR descriptions: human voice — first person, plain sentences, brief; cover the substance without exhaustive bullet inventories or marketing polish. Follow `.github/pull_request_template.md`. Concise: Why/What/Solution a short paragraph each, readable in two minutes; one fact per sentence; no vendor-source trivia, no history of how we got there, no restating what the diff shows. Test plan names what is covered, not every test.
+
+## Code comments
+- Only where the code cannot say it: a vendor or protocol fact, a non-obvious consequence, a
+  fixture's meaning, a deliberate divergence from the obvious choice. Never what the next line
+  does, never why the design is good, never history. Public API docstrings state the contract
+  and what a host must know, not the implementation. In tests, put the reasoning in the
+  `#expect` message, not a comment above it. Review the diff's comments before every PR and cut.
 
 ## Build & test
 - Test command: `xcodebuild -scheme RainSDK-Package -destination 'platform=iOS Simulator,name=iPhone 18 Pro' test` (always use the iPhone 18 Pro simulator).
@@ -371,6 +378,35 @@ Phase 2 (replanned 2026-09-07) — auth moves INSIDE the SDK for Turnkey and Rai
   platforms): NO self-broadcast fallback — Avalanche (Rain's README example chain!), Celo,
   ZKsync are read-only through Turnkey until a signRawPayload + own-RPC path exists or Turnkey
   adds the chains.
+  SPONSORED RENT (WALL-163, 2026-10-30, branch volo/feature/sponsored-solana-rent; twin of
+  Android #83 / WALL-162, parent WALL-160). VENDOR FACT (docs.turnkey.com solana-rent-refunds):
+  with the org's "Sponsor Solana Rent" switch on (Enterprise, off by default), Turnkey PRE-FUNDS
+  the user signer for a created account's rent WHEN THAT SIGNER IS THE PAYER — so the bytes do
+  not change and the sender must stay the ATA payer; refunded rent on a later close goes to the
+  signer, not the sponsor (extraction risk; guardrails are org spend caps, and the SDK composes
+  no CloseAccount). Core: `WalletProvider.sponsorsRent(chainId:)` (default false; doc: only
+  consulted when `sponsorsFees` is true — core ANDs the two in `prepareSolanaWithdrawal`),
+  `SolanaLamportPreflight` (NEW, shared by BOTH composers — the withdraw composer had NO lamport
+  check before; fee unless sponsored + rent unless sponsored, rent READ FROM THE CLUSTER via
+  `SolanaRpcClient.getMinimumBalanceForRentExemption(chainId:dataLength: 165)` — the pinned
+  2_039_280 is GONE, mainnet/devnet answered 1_488_440 on 2026-10-29; no cache; Token-2022 ATAs
+  are larger, the dry run catches it), `Simulation.fundsShortfall`
+  (`InsufficientFundsForFee|ForRent` in the error) → `insufficientFunds` RAIN_402 in both
+  composers where a dry-run refusal used to be RAIN_403/405 — cross-platform contract change,
+  Android #83 made the same move. `buildPreparedWithdrawal(selfPaid:)`: `prepareWithdrawal`
+  passes true (host submits AND pays — every check runs as unsponsored; was provider-driven on
+  iOS, Android already passed false/false), `withdrawCollateral` false. Turnkey:
+  `TurnkeyConfig.sponsorRent` (default false, both inits), adapter `sponsorsRent` =
+  `sponsorRent && isSolana && sponsorsFees(chainId)`, SPL send passes both flags;
+  `sendFailure` classifies a Solana shortfall FIRST (`transactionErrorJson` InsufficientFunds*,
+  or a log line matching `^Transfer: insufficient lamports (\d+), need (\d+)$` — the System
+  Program's `ic_msg`, no "Program log:" prefix — with amounts). RainWallet passes
+  `sponsorRent: true` ALWAYS (Rain's switch, partner can't see it; a flip reaches installed
+  apps without a release; until the switch is on, a 0-SOL first-time-recipient send fails after
+  signing as RAIN_402). Test seams: `TestManagers.turnkeyManager(sponsorRent:)`, mock
+  `.solanaLamportShortfall(transactionErrorJson:logs:)`, stub `getMinimumBalanceForRentExemption`
+  with a bare number (default "0x0" fallback fails the parse). Device validation pending the
+  sandbox org switch, like Android.
 - PR G (IN PROGRESS 2026-09-23, branch volo/refactor/apply-platform-parity-changes), RainWallet
   host-facing PARITY with Android (ticket list, all v5 clean breaks, no typealiases):
   `RainSDKError` → `RainError` (file `Core/RainError.swift`); `internalLogicError` →

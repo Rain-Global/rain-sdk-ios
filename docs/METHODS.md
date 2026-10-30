@@ -301,8 +301,10 @@ provider, submits on-chain, and returns the transaction hash.
 Builds a withdrawal without broadcasting it. Takes the same parameters as `withdrawCollateral`.
 
 This is **not** an offline build: it still prompts the wallet to sign EIP-712 (EVM) and reads the
-collateral's admin set on chain. On Solana it additionally fetches a recent blockhash and simulates
-the transaction.
+collateral's admin set on chain. On Solana it additionally fetches a recent blockhash, checks the
+wallet holds the fee and any recipient-account rent, and simulates the transaction — always as a
+self-paid send, whatever the provider sponsors on its own sends, because the host submits and
+pays for a prepared transaction.
 
 - **Returns:** `RainPreparedWithdrawal` — `.evm(RainTransactionParameters)` carrying a complete,
   submittable transaction (`from` / `to` / `value` / `data`), or `.solana(UnsignedSolanaTransfer)`
@@ -822,8 +824,8 @@ for programmatic handling — the same codes as the Android SDK.
 | `RAIN_302` | `transactionPending(statusId:)` | A send was accepted but its hash is not known yet; resume polling with `statusId`, do not resend. On a Turnkey or Rain wallet send, EVM or Solana, whose activity the backend accepted without a readable status id yet, `statusId` is the backend's activity id — no call takes it, but it matches the history row for the send. |
 | `RAIN_305` | `transactionOutcomeUnknown(details:)` | The send was handed to the wallet provider and the SDK then lost track of it — a server error, a transport failure or an unreadable answer after the provider may already have accepted it — so there is no identifier to resume from. Not a settled failure: the transaction may still land, and resending risks a duplicate transfer. Read history or the balance before sending again. Raised by the Turnkey provider and the Rain wallet in the cases under [After a send is accepted](TURNKEY_SUPPORT.md#after-a-send-is-accepted). `RAIN_501` from a Turnkey or Rain wallet send means the send settled as failed or was refused, and nothing moved. (303 and 304 are retired; the sequence resumes at 305, as on Android.) |
 | `RAIN_401` | `userRejected` | User cancelled the signing request in the wallet. |
-| `RAIN_402` | `insufficientFunds(required:available:)` | Balance too low for the requested amount or gas. |
-| `RAIN_403` | `transactionSimulationFailed(underlying:)` | Preflight `eth_call` simulation failed (e.g. contract revert, insufficient funds). |
+| `RAIN_402` | `insufficientFunds(required:available:)` | Balance too low for the requested amount or gas. On Solana this also covers the rent-exempt deposit of a recipient token account the send creates, unless the provider sponsors rent (see [Solana rent](TURNKEY_SUPPORT.md#solana-rent)): the SDK reads the deposit from the cluster and refuses before signing, a dry run the runtime refuses for a lamport shortfall maps here (it was `RAIN_403` / `RAIN_405` before), and so does a Turnkey send that failed for one after signing, with the System Program's amounts when it logged them; `required` / `available` are `"unknown"` when the runtime named the shortfall without amounts. |
+| `RAIN_403` | `transactionSimulationFailed(underlying:)` | Preflight `eth_call` simulation failed (e.g. contract revert). A Solana dry run refused for a fee or rent shortfall is `RAIN_402` instead. |
 | `RAIN_404` | `walletUnavailable(details:)` | The backing provider returned no usable wallet address for this chain family. |
 | `RAIN_405` | `withdrawalRevertedByNetwork(details:)` | The collateral contract rejected the withdrawal (e.g. already-used or expired admin signature, duplicate amount inside the cooldown); `details` carries the decoded reason when available. |
 | `RAIN_406` | `invalidAmount(amount:reason:)` | The amount is invalid for the token (more decimal places than the token supports, or unrepresentable). |

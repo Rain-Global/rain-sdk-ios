@@ -108,13 +108,44 @@ the send would have — deliberately, so a host can show the user what sponsorsh
 Sponsored sends are minimal payloads —
 Turnkey builds the outer transaction, so the SDK pins no nonce or gas quote; replay protection
 is Turnkey's gas-station nonce, fetched per send. Solana sends are sponsored too, network fee
-only: rent for a first-time recipient's token account is a separate Turnkey toggle and stays the
-sender's, so the SDK's rent preflight still runs while the fee check and dry run are skipped.
+only: the fee check and dry run are skipped, and the rent of a first-time recipient's token
+account follows `sponsorRent` (below).
 
 Sponsorship must be enabled on the Turnkey organization (Enterprise feature, dashboard); on an
 organization where it is not, Turnkey rejects sponsored sends — pass `sponsorGas: false` there,
 and the wallet pays its own fees with the SDK's own nonce/gas quoting. With `sponsorGas` on the
 provider advertises `Capability.gasSponsorship`.
+
+### Solana rent
+
+The first transfer of a token to someone who has never held it creates their token account, and
+that account needs a rent-exempt deposit. Who pays it is Turnkey's separate "Sponsor Solana Rent"
+switch (Enterprise plans, off by default). `TurnkeyConfig(sponsorRent:)` tells the SDK what that
+switch says, and defaults to false like the switch. With it off, the SDK reads the deposit from
+the cluster (`getMinimumBalanceForRentExemption` for a 165-byte account; about 0.0015 SOL in
+late 2026) and refuses the send with `insufficientFunds` before signing when the sender cannot
+cover it. With it on, and `sponsorGas` on, the rent check is skipped: Turnkey pre-funds the
+payer inside the sponsored send. The transaction itself does not change, and the sender must
+stay the created account's payer — that is the condition under which Turnkey pre-funds. Rent is
+never sponsored without the fee, because Turnkey only pre-funds inside a sponsored send.
+
+If `sponsorRent` is on but the organization's switch is off, a sender holding no SOL gets a
+signed send that fails at the backend; the adapter maps the runtime's `InsufficientFundsForRent`
+or the System Program's `Transfer: insufficient lamports <held>, need <needed>` log line to
+`insufficientFunds` (RAIN_402) with the amounts, instead of a generic failure. A self-paid dry
+run the runtime refuses for a fee or rent shortfall is `insufficientFunds` too, where it used to
+surface as a simulation failure.
+
+Two things to know before turning the switch on. Refunded rent follows Solana's rules: when a
+sponsored account is later closed, the deposit goes to the account's owner or the signer, not back
+to the sponsor — and a user who exports their key can close accounts themselves, so the real
+guardrails are spend caps and monitoring on the organization (Turnkey's rent-sponsorship page
+covers this). And the SDK composes no `CloseAccount` instruction, which keeps the common leakage
+path out of its own sends.
+
+`RainWalletConfig` has no rent parameter: the Rain wallet passes `sponsorRent: true` always,
+because whether rent is funded is Rain's switch, which a partner can neither see nor set, and a
+flip has to reach installed apps without a release.
 
 ## After a send is accepted
 
@@ -177,7 +208,7 @@ for non-completed statuses and expose `ActivityPollerConfig` on `TurnkeyContext`
 
 The Turnkey adapter is the SDK's multi-chain provider (it advertises `.multiChain`): Solana sentinel chain ids (`RainChain.solanaMainnet` 900 / `solanaDevnet` 901 / `solanaTestnet` 902) route `getWalletAddress(chainId:)`, balances, `sendNative`, `sendToken`, `withdrawCollateral`, and `getTransactions` to the Turnkey Solana account.
 
-- Native SOL and SPL token transfers are both supported end to end. Composition and every preflight live in core's `SolanaTransferComposer` (shared with the Privy adapter, so the two cannot drift); the provider only signs and broadcasts. For an SPL transfer that means: recipient validated as a wallet (not a token account or mint), mint resolved on chain for its decimals and owning token program (classic SPL Token or Token-2022), sender's associated token account derived and checked for balance, recipient's account created in the same transaction when missing (`CreateIdempotent`, ~0.002 SOL rent paid by the sender), SOL-for-fees checked, and the whole thing dry-run with `simulateTransaction` before it is handed over for signing.
+- Native SOL and SPL token transfers are both supported end to end. Composition and every preflight live in core's `SolanaTransferComposer` (shared with the Privy adapter, so the two cannot drift); the provider only signs and broadcasts. For an SPL transfer that means: recipient validated as a wallet (not a token account or mint), mint resolved on chain for its decimals and owning token program (classic SPL Token or Token-2022), sender's associated token account derived and checked for balance, recipient's account created in the same transaction when missing (`CreateIdempotent`; its rent, read from the cluster, is demanded from the sender unless sponsored — see *Solana rent* above), SOL-for-fees checked, and the whole thing dry-run with `simulateTransaction` before it is handed over for signing.
 - Token-transfer failures surface as their own errors — `tokenNotFound`, `tokenAccountNotFound`, `insufficientTokenBalance`, `invalidRecipient` — which reuse existing `RAIN_*` codes so the code map stays identical to Android's.
 - SPL balances come from Turnkey's `get-balances` where it indexes the cluster. Where it doesn't (devnet in particular, where Turnkey answers with SOL only or errors), `getTokenBalances` discovers the wallet's holdings from the node instead: `getTokenAccountsByOwner` against both token programs, summed per mint. Solana has no token registry, so nothing has to be registered up front — but symbol / name stay `nil` unless the mint is registered, since that metadata lives off chain (Metaplex).
 - `getTransactions` is sourced from Turnkey's activity log (`ACTIVITY_TYPE_SOL_SEND_TRANSACTION`), matching the EVM path: it lists only what this wallet sent through Turnkey — no receives — and the row's hash is the Turnkey status id, not an explorer-resolvable signature. Both transfer shapes are decoded out of the activity's unsigned transaction: a System transfer becomes a native row (`category: "external"`, `asset: "SOL"`), an SPL `TransferChecked` a token row (`category: "token"`, mint + raw amount + decimals in `rawContract`, `asset` only when the mint is registered — Solana keeps symbols off chain). An SPL transfer's recipient is a token account, so the wallet behind it comes from the transaction's account-creation instruction when present and from one `getAccountInfo` otherwise; if neither resolves, the token account itself is reported rather than dropping the row.

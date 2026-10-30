@@ -37,15 +37,20 @@ public struct TurnkeyConfig: @unchecked Sendable {
   /// withdrawals, Auth Pull approvals and raw `sendTransaction` calls alike: Turnkey's Gas
   /// Station builds and pays the fee (gasless for the end user). Fee estimates still quote the
   /// on-chain cost — what the user saves — so hosts can display it. Sponsorship cost passes
-  /// through to the partner that turns this on. Solana sends are
-  /// sponsored too (network fee only: rent for a first-time recipient's token account is a
-  /// separate Turnkey toggle, off by default, so the sender must still hold it).
+  /// through to the partner that turns this on. Solana sends are sponsored too, the network fee
+  /// only: the rent of a first-time recipient's token account follows `sponsorRent`.
   ///
   /// Defaults to true: sponsorship is the product, and Turnkey enables it at the parent
   /// organization level. On an organization where it is not enabled, Turnkey rejects sponsored
   /// sends, so pass false there. Sponsored sends have no client-side revert preflight; failures
   /// surface through Turnkey's decoded FAILED status.
   public let sponsorGas: Bool
+  /// Whether the organization's "Sponsor Solana Rent" switch is on, so the SDK stops demanding
+  /// the rent of a recipient token account a Solana send creates from the sender. Only applies
+  /// with `sponsorGas`: Turnkey pre-funds rent inside sponsored sends only. Off by default, like
+  /// the switch. On while the switch is off, a zero-SOL send to a first-time recipient is signed
+  /// and fails at the backend as `insufficientFunds` instead of being refused up front.
+  public let sponsorRent: Bool
   /// Optional explicit EVM wallet address. When `nil`, Rain uses the first Ethereum account from
   /// the Turnkey context.
   public let walletAddress: String?
@@ -64,11 +69,13 @@ public struct TurnkeyConfig: @unchecked Sendable {
     walletAddress: String? = nil,
     sessionPolicy: TurnkeySessionPolicy = TurnkeySessionPolicy(),
     sponsorGas: Bool = true,
+    sponsorRent: Bool = false,
     onSessionExpired: (@Sendable () -> Void)? = nil
   ) {
     self.mode = .byoContext(turnkey)
     self.walletAddress = walletAddress
     self.sponsorGas = sponsorGas
+    self.sponsorRent = sponsorRent
     self.sessionPolicy = sessionPolicy
     self.onSessionExpired = onSessionExpired
   }
@@ -98,6 +105,7 @@ public struct TurnkeyConfig: @unchecked Sendable {
     walletAddress: String? = nil,
     sessionPolicy: TurnkeySessionPolicy = TurnkeySessionPolicy(),
     sponsorGas: Bool = true,
+    sponsorRent: Bool = false,
     onSessionExpired: (@Sendable () -> Void)? = nil
   ) {
     self.mode = .managed(
@@ -107,6 +115,7 @@ public struct TurnkeyConfig: @unchecked Sendable {
     )
     self.walletAddress = walletAddress
     self.sponsorGas = sponsorGas
+    self.sponsorRent = sponsorRent
     self.sessionPolicy = sessionPolicy
     self.onSessionExpired = onSessionExpired
   }
@@ -197,6 +206,9 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
     return nil
   }
 
+  @_spi(RainWallet)
+  public var sponsorsRentWhenSponsoringGas: Bool { config.sponsorRent }
+
   /// Turnkey holds EVM + Solana accounts (`.multiChain`) and can export keys (`.export`); with
   /// `TurnkeyConfig.sponsorGas` on it also advertises `.gasSponsorship`. Signing itself is NOT
   /// biometric-gated — the vendor's enclave key uses a `.none` auth policy — so `.biometricGate`
@@ -244,6 +256,7 @@ public struct TurnkeyProvider: ProviderDescriptor, @unchecked Sendable {
       networkConfigs: context.networkConfigs,
       walletAddress: config.walletAddress,
       sponsorGas: config.sponsorGas,
+      sponsorRent: config.sponsorRent,
       chainReader: context.evmChainReader,
       solanaSupport: context.solanaSupport,
       tokenStore: context.tokenStore,

@@ -80,6 +80,7 @@ enum TestManagers {
     // Tests pin the self-paid send body and RPC-based estimates unless they opt into
     // sponsorship explicitly; the SDK's own default is true.
     sponsorGas: Bool = false,
+    sponsorRent: Bool = false,
     registeredTokens: [TokenInfo] = [],
     authPullChainIds: Set<Int> = RainAuthPullChains.sandbox,
     authPullTokenAddresses: [Int: String]? = nil,
@@ -99,6 +100,7 @@ enum TestManagers {
       networkConfigs: configs,
       walletAddress: walletAddress,
       sponsorGas: sponsorGas,
+      sponsorRent: sponsorRent,
       chainReader: reader,
       tokenStore: tokenStore,
       history: history

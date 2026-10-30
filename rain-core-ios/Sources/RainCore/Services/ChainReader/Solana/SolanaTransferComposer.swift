@@ -8,7 +8,8 @@ public struct UnsignedSolanaTransfer: Sendable {
   /// and not a rebuilt variant.
   public let transaction: Data
   public let recentBlockhash: String
-  /// Whether the transfer also creates the recipient's token account (the sender pays its rent).
+  /// Whether the transfer also creates the recipient's token account, whose rent the sender pays
+  /// unless the provider sponsors it (`WalletProvider.sponsorsRent`).
   public let createsRecipientAccount: Bool
 
   /// Lowercase hex of ``transaction`` — the encoding Turnkey's `sol_send_transaction` expects.
@@ -28,14 +29,6 @@ public struct UnsignedSolanaTransfer: Sendable {
 /// creation, balance and fee checks, and a simulation dry run for SPL transfers. Providers only
 /// sign and broadcast the result, so the checks cannot drift between them.
 @_spi(RainAdapter) public struct SolanaTransferComposer: Sendable {
-  /// Base fee for a single-signature Solana transaction.
-  private static let feeLamports: UInt64 = 5_000
-  /// Rent-exempt minimum for a 165-byte SPL token account (~0.00204 SOL), paid by the sender when
-  /// a transfer has to create the recipient's account. Read from the chain it would be
-  /// `getMinimumBalanceForRentExemption(165)`; this constant only gates a friendlier up-front
-  /// error, and the transaction is simulated afterwards regardless.
-  private static let tokenAccountRentLamports: UInt64 = 2_039_280
-
   private let rpcClient: SolanaRpcClient
 
   init(rpcClient: SolanaRpcClient) {
@@ -73,7 +66,8 @@ public struct UnsignedSolanaTransfer: Sendable {
   ///
   /// Tokens live in per-mint *token accounts*, not in the wallet itself, so `toAddress` is the
   /// recipient's wallet and the account that actually receives the transfer is derived from it.
-  /// Creating a missing recipient account costs the sender rent (~0.002 SOL).
+  /// Creating a missing recipient account costs the sender its rent unless `sponsoredRent`. The
+  /// sender stays the payer either way: Turnkey pre-funds the payer, not a separate account.
   ///
   /// The mint is read from the chain first: its decimals scale `amount`, and the token program
   /// that owns it both receives the transfer and seeds the token-account derivation. The transfer
@@ -82,16 +76,17 @@ public struct UnsignedSolanaTransfer: Sendable {
   ///
   /// `sponsoredFees` opts out of the two self-paid preflights — the fee-lamport check and the
   /// dry run — for a provider whose sends are fee-sponsored: both would false-fail exactly the
-  /// zero-SOL wallets sponsorship exists for. The rent check stays, because rent sponsorship is a
-  /// separate toggle. A sponsored send's failures then surface through the provider's send
-  /// status instead of as a typed preflight error.
+  /// zero-SOL wallets sponsorship exists for; `sponsoredRent` drops the rent term too. A
+  /// sponsored send's failures then surface through the provider's send status instead of as a
+  /// typed preflight error.
   @_spi(RainAdapter) public func composeSPLToken(
     chainId: Int,
     from fromAddress: String,
     mintAddress: String,
     to toAddress: String,
     amount: Decimal,
-    sponsoredFees: Bool = false
+    sponsoredFees: Bool = false,
+    sponsoredRent: Bool = false
   ) async throws -> UnsignedSolanaTransfer {
     try Self.validateAddress(fromAddress, label: "sender")
     try Self.validateAddress(toAddress, label: "recipient")
@@ -147,11 +142,13 @@ public struct UnsignedSolanaTransfer: Sendable {
     }
 
     let createDestination = !(try await rpcClient.accountExists(chainId: chainId, address: destination))
-    try await requireLamportsForFees(
+    try await SolanaLamportPreflight.require(
+      rpcClient: rpcClient,
       chainId: chainId,
       address: fromAddress,
       includeAccountRent: createDestination,
-      feesSponsored: sponsoredFees
+      feesSponsored: sponsoredFees,
+      rentSponsored: sponsoredRent
     )
 
     let blockhash = try await rpcClient.getLatestBlockhash(chainId: chainId)
@@ -228,39 +225,18 @@ public struct UnsignedSolanaTransfer: Sendable {
     }
   }
 
-  /// Fails early when the wallet cannot cover the network fee (plus token-account rent when the
-  /// transfer has to create one). Simulation would catch this too, but only as an opaque program
-  /// error — SOL for fees is a distinct problem from the token balance itself. Fee sponsorship
-  /// covers the network fee only: rent for a token account the transaction creates is still the
-  /// sender's, so with `feesSponsored` the fee drops out of the requirement and rent stays.
-  private func requireLamportsForFees(
-    chainId: Int,
-    address: String,
-    includeAccountRent: Bool,
-    feesSponsored: Bool
-  ) async throws {
-    let required = (feesSponsored ? 0 : Self.feeLamports)
-      + (includeAccountRent ? Self.tokenAccountRentLamports : 0)
-    if required == 0 { return }
-    let lamports = try await rpcClient.getBalanceLamports(chainId: chainId, address: address)
-    guard lamports >= BigUInt(required.description) ?? 0 else {
-      RainLogger.warning(
-        "Rain SDK: wallet \(address) holds \(lamports) lamports, needs \(required) for this transfer"
-      )
-      throw RainError.insufficientFunds(
-        required: SolanaConverter.lamportsToSol(required).description,
-        available: SolanaConverter.lamportsToSol(lamports).description
-      )
-    }
-  }
-
-  /// Dry-runs the unsigned transaction, translating a simulation failure into a typed error.
+  /// Dry-runs the unsigned transaction, translating a simulation failure into a typed error. A
+  /// lamport shortfall the runtime refused is `insufficientFunds`: the preflight's estimate is
+  /// approximate (flat fee, 165-byte account), so the runtime's word wins.
   private func simulate(chainId: Int, transaction: [UInt8]) async throws {
     let simulation = try await rpcClient.simulateTransaction(
       chainId: chainId,
       base64Transaction: Data(transaction).base64EncodedString()
     )
     guard !simulation.succeeded else { return }
+    if simulation.fundsShortfall {
+      throw RainError.insufficientFunds(required: "unknown", available: "unknown")
+    }
 
     RainLogger.error(
       """

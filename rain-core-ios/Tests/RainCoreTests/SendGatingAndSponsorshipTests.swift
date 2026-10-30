@@ -20,6 +20,7 @@ struct SendGatingAndSponsorshipTests {
     let provider = Minimal()
     try provider.requireSendSupport(chainId: 43114) // no-op
     #expect(provider.sponsorsFees(chainId: 1) == false)
+    #expect(provider.sponsorsRent(chainId: RainChain.solanaMainnet) == false)
   }
 
   @Test("chainNotSupported carries RAIN_104 and names the chain")

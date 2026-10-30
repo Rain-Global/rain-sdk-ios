@@ -819,6 +819,7 @@ struct PrivySolanaTests {
       switch body["method"] as? String {
       case "getAccountInfo": return accounts.next()
       case "getBalance": return RpcStub.rawResult(["context": ["slot": 1], "value": 1_000_000_000])
+      case "getMinimumBalanceForRentExemption": return RpcStub.rawResult(1_488_440)
       case "getLatestBlockhash":
         return RpcStub.rawResult(["context": ["slot": 1], "value": ["blockhash": Self.solanaAddress]])
       case "simulateTransaction":

@@ -41,6 +41,22 @@ import Web3
     return BigUInt(value.stringValue) ?? 0
   }
 
+  /// The lamports an account of `dataLength` bytes must hold to be rent exempt.
+  func getMinimumBalanceForRentExemption(chainId: Int, dataLength: Int) async throws -> BigUInt {
+    let rpcUrl = try resolveRpcUrl(chainId: chainId)
+    let response = try await jsonRpcClient.call(
+      rpcUrl: rpcUrl,
+      method: "getMinimumBalanceForRentExemption",
+      params: [dataLength]
+    )
+    guard let value = response["result"] as? NSNumber else {
+      throw RainError.internalError(
+        details: "Unexpected getMinimumBalanceForRentExemption response for \(dataLength) bytes"
+      )
+    }
+    return BigUInt(value.stringValue) ?? 0
+  }
+
   /// Most recent blockhash via `getLatestBlockhash`, used as a transfer's `recentBlockhash`.
   func getLatestBlockhash(chainId: Int) async throws -> String {
     let rpcUrl = try resolveRpcUrl(chainId: chainId)
@@ -94,6 +110,13 @@ import Web3
     let logs: [String]
 
     var succeeded: Bool { error == nil }
+
+    /// The runtime refused the payer's lamports rather than the program's logic: a fee or rent
+    /// shortfall.
+    var fundsShortfall: Bool {
+      guard let error else { return false }
+      return error.contains("InsufficientFundsForFee") || error.contains("InsufficientFundsForRent")
+    }
   }
 
   /// `getAccountInfo` for `address`, or `nil` when no account exists there.

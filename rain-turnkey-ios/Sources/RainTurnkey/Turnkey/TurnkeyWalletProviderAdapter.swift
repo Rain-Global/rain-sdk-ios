@@ -72,6 +72,7 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
   /// Fee estimates still quote the on-chain cost, so hosts can show the saving. See
   /// `TurnkeyConfig.sponsorGas`.
   private let sponsorGas: Bool
+  private let sponsorRent: Bool
 
   // MARK: - Send gating & sponsorship (WalletProvider hooks)
 
@@ -84,6 +85,11 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
   /// Sponsorship applies exactly where Turnkey can broadcast; elsewhere the wallet pays.
   public func sponsorsFees(chainId: Int) -> Bool {
     sponsorGas && TurnkeyBroadcastChains.supportsSend(chainId: chainId)
+  }
+
+  /// Turnkey pre-funds rent only inside a sponsored send.
+  public func sponsorsRent(chainId: Int) -> Bool {
+    sponsorRent && RainChain.isSolana(chainId) && sponsorsFees(chainId: chainId)
   }
 
   /// The capabilities a Turnkey provider advertises for a given `sponsorGas` setting. Shared
@@ -115,6 +121,7 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
     networkConfigs: [NetworkConfig],
     walletAddress: String? = nil,
     sponsorGas: Bool = true,
+    sponsorRent: Bool = false,
     jsonRpcClient: JsonRpcClient = JsonRpcClient(),
     chainReader: ChainReader,
     solanaSupport: RainSolanaSupport? = nil,
@@ -127,6 +134,7 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
     self.networkConfigsByChainId = Dictionary(uniqueKeysWithValues: networkConfigs.map { ($0.chainId, $0) })
     self.walletAddressOverride = walletAddress
     self.sponsorGas = sponsorGas
+    self.sponsorRent = sponsorRent
     self.jsonRpcClient = jsonRpcClient
     // Required (no EVMChainReader fallback): that type is core-internal, and `TurnkeyProvider`
     // always hands in the shared reader from `ProviderContext`.
@@ -1142,7 +1150,8 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
       amount: amount,
       // A sponsored send skips the self-paid fee check and dry run, and carries the System
       // Program key Turnkey's sponsored path can require.
-      sponsoredFees: sponsorsFees(chainId: chainId)
+      sponsoredFees: sponsorsFees(chainId: chainId),
+      sponsoredRent: sponsorsRent(chainId: chainId)
     )
     return try await submitSolanaTransaction(chainId: chainId, from: from, unsigned: unsigned)
   }
@@ -1526,7 +1535,9 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
   /// would have caught before signing. Sponsored sends skip that dry run, so this is where the
   /// revert surfaces; it maps to `transactionSimulationFailed` so core's withdrawal path yields
   /// `withdrawalRevertedByNetwork` (RAIN_405) for both, instead of a generic `providerError`.
-  /// Any other failure (rejected by Turnkey, unknown) stays `providerError`. `nil` = not failed.
+  /// A Solana fee or rent shortfall is `insufficientFunds` instead, checked first because the
+  /// runtime logs a failed program for it too. Any other failure (rejected by Turnkey, unknown)
+  /// stays `providerError`. `nil` = not failed.
   static func sendFailure(
     from status: TGetSendTransactionStatusResponse, fallbackMessage: String
   ) -> RainError? {
@@ -1535,6 +1546,9 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
       || status.txError != nil || status.error?.message != nil
     guard failed else { return nil }
 
+    if let shortfall = Self.solanaShortfall(status.error?.solana) {
+      return shortfall
+    }
     let message = status.txError ?? status.error?.message ?? fallbackMessage
     let underlying = NSError(
       domain: "TurnkeyTransaction", code: -1, userInfo: [NSLocalizedDescriptionKey: message]
@@ -1543,6 +1557,36 @@ internal final class TurnkeyWalletProviderAdapter: WalletProvider, RainTypedData
       return .transactionSimulationFailed(underlying: underlying)
     }
     return .providerError(underlying: underlying)
+  }
+
+  /// The System Program's own line (an `ic_msg`, so no `Program log:` prefix); a program's log
+  /// never has this shape.
+  private static let systemTransferShortfall = try! NSRegularExpression(
+    pattern: #"^Transfer: insufficient lamports (\d+), need (\d+)$"#
+  )
+
+  /// A lamport shortfall is not a program refusal: the runtime names it in the error JSON, or the
+  /// System Program logs what the payer held and needed when it could not fund a created account.
+  private static func solanaShortfall(_ solana: v1SolanaFailureDetails?) -> RainError? {
+    guard let solana else { return nil }
+    let json = solana.transactionErrorJson ?? ""
+    if json.contains("InsufficientFundsForFee") || json.contains("InsufficientFundsForRent") {
+      return .insufficientFunds(required: "unknown", available: "unknown")
+    }
+    for line in solana.logs ?? [] {
+      let range = NSRange(line.startIndex..., in: line)
+      guard let match = systemTransferShortfall.firstMatch(in: line, range: range),
+            let heldRange = Range(match.range(at: 1), in: line),
+            let neededRange = Range(match.range(at: 2), in: line),
+            let held = BigUInt(String(line[heldRange])),
+            let needed = BigUInt(String(line[neededRange]))
+      else { continue }
+      return .insufficientFunds(
+        required: SolanaConverter.lamportsToSol(needed).description,
+        available: SolanaConverter.lamportsToSol(held).description
+      )
+    }
+    return nil
   }
 
   private static func carriesOnChainRevert(_ error: v1TxError?) -> Bool {
