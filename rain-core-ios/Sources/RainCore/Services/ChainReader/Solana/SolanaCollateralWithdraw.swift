@@ -26,6 +26,8 @@ internal struct SolanaCollateralWithdrawComposer: Sendable {
     self.rpcClient = rpcClient
   }
 
+  /// The owner stays the created account's payer whether or not rent is sponsored; Turnkey
+  /// pre-funds the payer, not a separate account.
   func composeWithdraw(
     chainId: Int,
     ownerAddress: String,
@@ -34,7 +36,8 @@ internal struct SolanaCollateralWithdrawComposer: Sendable {
     recipientAddress: String,
     amountBaseUnits: BigUInt,
     adminSignature: RainAdminSignature,
-    sponsoredFees: Bool = false
+    sponsoredFees: Bool = false,
+    sponsoredRent: Bool = false
   ) async throws -> UnsignedSolanaTransfer {
     let ownerKey = try decodeKey(ownerAddress, label: "owner")
     let collateralKey = try decodeKey(collateralAddress, label: "collateral")
@@ -112,6 +115,14 @@ internal struct SolanaCollateralWithdrawComposer: Sendable {
     let createDestination = try await !rpcClient.accountExists(
       chainId: chainId,
       address: destinationAta
+    )
+    try await SolanaLamportPreflight.require(
+      rpcClient: rpcClient,
+      chainId: chainId,
+      address: ownerAddress,
+      includeAccountRent: createDestination,
+      feesSponsored: sponsoredFees,
+      rentSponsored: sponsoredRent
     )
 
     // Reconstruct the exact message the executor signed; the program re-derives it on chain and
@@ -231,6 +242,9 @@ internal struct SolanaCollateralWithdrawComposer: Sendable {
       base64Transaction: Data(transaction).base64EncodedString()
     )
     if simulation.succeeded { return }
+    if simulation.fundsShortfall {
+      throw RainError.insufficientFunds(required: "unknown", available: "unknown")
+    }
     RainLogger.error(
       "Rain SDK: Solana withdrawal simulation failed: \(simulation.error ?? "unknown"); "
         + "logs: \(simulation.logs.joined(separator: " | "))"

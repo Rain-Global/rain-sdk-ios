@@ -151,14 +151,16 @@ final class RainSdkManager: RainClient, @unchecked Sendable {
       // Deliberately NOT gated on `requireSendSupport`: preparing only signs the EIP-712 message
       // (or composes the Solana transaction) and never broadcasts, and signing is not limited to
       // the provider's broadcast chains. The prepared parameters are also what a host can submit
-      // through its own RPC on a chain the provider cannot broadcast on.
+      // through its own RPC on a chain the provider cannot broadcast on — and pay for, so a
+      // Solana preparation runs every self-paid check whatever the provider sponsors.
       return try await buildPreparedWithdrawal(
         chainId: chainId,
         assetAddresses: addresses,
         amount: amount,
         decimals: decimals,
         adminSignature: adminSignature,
-        nonce: nonce
+        nonce: nonce,
+        selfPaid: true
       )
     } catch is CancellationError {
       // The caller walked away; the generic wrap would call that a provider failure.

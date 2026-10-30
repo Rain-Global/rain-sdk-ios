@@ -41,14 +41,16 @@ extension RainSdkManager {
   }
 
   /// Builds a withdrawal for `chainId` without broadcasting it — the one pipeline behind
-  /// `withdrawCollateral`, `prepareWithdrawal`, and `estimateWithdrawalFee`.
+  /// `withdrawCollateral`, `prepareWithdrawal`, and `estimateWithdrawalFee`. `selfPaid`: the
+  /// host submits and pays, so every Solana check runs as unsponsored.
   func buildPreparedWithdrawal(
     chainId: Int,
     assetAddresses: RainWithdrawAddresses,
     amount: Decimal,
     decimals: Int,
     adminSignature: RainAdminSignature,
-    nonce: BigUInt?
+    nonce: BigUInt?,
+    selfPaid: Bool = false
   ) async throws -> RainPreparedWithdrawal {
     try validateWithdrawRequest(chainId: chainId, amount: amount, decimals: decimals)
 
@@ -61,7 +63,8 @@ extension RainSdkManager {
         assetAddresses: assetAddresses,
         amount: amount,
         decimals: decimals,
-        adminSignature: adminSignature
+        adminSignature: adminSignature,
+        selfPaid: selfPaid
       )
       return .solana(unsigned)
     }
@@ -84,10 +87,14 @@ extension RainSdkManager {
     assetAddresses: RainWithdrawAddresses,
     amount: Decimal,
     decimals: Int,
-    adminSignature: RainAdminSignature
+    adminSignature: RainAdminSignature,
+    selfPaid: Bool = false
   ) async throws -> UnsignedSolanaTransfer {
     let owner = try await walletProvider.getAddress(chainId: chainId)
     let amountBaseUnits = try AmountHelpers.toBaseUnits(amount: amount, decimals: decimals)
+    // Turnkey pre-funds rent only inside a sponsored send.
+    let sponsoredFees = !selfPaid && walletProvider.sponsorsFees(chainId: chainId)
+    let sponsoredRent = sponsoredFees && walletProvider.sponsorsRent(chainId: chainId)
 
     return try await solanaWithdrawComposer.composeWithdraw(
       chainId: chainId,
@@ -97,9 +104,8 @@ extension RainSdkManager {
       recipientAddress: assetAddresses.recipientAddress,
       amountBaseUnits: amountBaseUnits,
       adminSignature: adminSignature,
-      // A fee-sponsored provider pays the network fee, so the composer must not dry-run as if
-      // the owner paid: a zero-SOL wallet would false-fail before the send.
-      sponsoredFees: walletProvider.sponsorsFees(chainId: chainId)
+      sponsoredFees: sponsoredFees,
+      sponsoredRent: sponsoredRent
     )
   }
 

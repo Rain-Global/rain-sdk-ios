@@ -127,6 +127,34 @@ struct SolanaCollateralWithdrawComposerTests {
     }
     MockURLProtocol.stub(method: "getLatestBlockhash", result: ["value": ["blockhash": mint]])
     MockURLProtocol.stub(method: "simulateTransaction", result: ["value": ["err": NSNull(), "logs": []]])
+    MockURLProtocol.stub(method: "getBalance", result: ["value": 1_000_000_000])
+    MockURLProtocol.stub(method: "getMinimumBalanceForRentExemption", result: 1_488_440)
+  }
+
+  /// `stubHappyPath` with no token account at the recipient's ATA, so the withdrawal creates it.
+  private func stubRecipientWithoutTokenAccount() throws {
+    try stubHappyPath()
+    let ata = try destinationAta()
+    let tokenProgram = SolanaPrograms.splToken
+    let rawData: [String: String] = [collateral: collateralData, coordinator: coordinatorData]
+    let rawOwners: [String: String] = [collateral: programId, coordinator: programId]
+    let mintAddress = mint
+    MockURLProtocol.stub(method: "getAccountInfo") { params in
+      guard let address = params.first as? String, address != ata else { return ["value": NSNull()] }
+      if address == mintAddress {
+        return [
+          "value": [
+            "owner": tokenProgram,
+            "lamports": 1_461_600,
+            "data": ["parsed": ["type": "mint", "info": ["decimals": 6]]]
+          ] as [String: Any]
+        ]
+      }
+      guard let data = rawData[address], let ownerProgram = rawOwners[address] else {
+        return ["value": NSNull()]
+      }
+      return ["value": ["owner": ownerProgram, "lamports": 2_122_800, "data": [data, "base64"]] as [String: Any]]
+    }
   }
 
   @Test("composes the two-instruction withdrawal the program accepted on devnet")
@@ -319,6 +347,132 @@ struct SolanaCollateralWithdrawComposerTests {
           mintAddress: mint,
           recipientAddress: owner,
           amountBaseUnits: 1,
+          adminSignature: adminSignature
+        )
+      }
+    }
+  }
+
+  @Test("a dry run the runtime refuses for a lamport shortfall is insufficientFunds, not a program revert")
+  func testSimulationShortfallIsInsufficientFunds() async throws {
+    try await MockURLProtocol.withInstalled {
+      try stubHappyPath()
+      MockURLProtocol.stub(
+        method: "simulateTransaction",
+        result: ["value": ["err": ["InsufficientFundsForRent": ["account_index": 1]], "logs": []]]
+      )
+
+      await #expect(throws: RainError.insufficientFunds(required: "", available: "")) {
+        _ = try await makeComposer().composeWithdraw(
+          chainId: devnet,
+          ownerAddress: owner,
+          collateralAddress: collateral,
+          mintAddress: mint,
+          recipientAddress: owner,
+          amountBaseUnits: 1,
+          adminSignature: adminSignature
+        )
+      }
+    }
+  }
+
+  @Test("a self-paid withdrawal that creates the recipient's account reads the rent from the cluster and demands it up front")
+  func testSelfPaidRentReadFromCluster() async throws {
+    try await MockURLProtocol.withInstalled {
+      try stubRecipientWithoutTokenAccount()
+      MockURLProtocol.stub(method: "getBalance", result: ["value": 1_000_000])
+
+      let error = await #expect(throws: RainError.self) {
+        _ = try await makeComposer().composeWithdraw(
+          chainId: devnet,
+          ownerAddress: owner,
+          collateralAddress: collateral,
+          mintAddress: mint,
+          recipientAddress: owner,
+          amountBaseUnits: 1,
+          adminSignature: adminSignature
+        )
+      }
+      guard case .insufficientFunds(let required, _) = error else {
+        Issue.record("expected insufficientFunds, got \(String(describing: error))")
+        return
+      }
+      #expect(required == "0.00149344", "5,000 fee + 1,488,440 rent, in SOL")
+      #expect(MockURLProtocol.recordedParams.contains { $0.first as? Int == 165 }, "the classic token account size")
+      #expect(!MockURLProtocol.recordedMethods.contains("simulateTransaction"), "refused before the dry run")
+    }
+  }
+
+  @Test("a sponsored withdrawal that creates the recipient's account reads neither rent nor balance, with the same bytes")
+  func testSponsoredRentSkipsTheChecks() async throws {
+    try await MockURLProtocol.withInstalled {
+      try stubRecipientWithoutTokenAccount()
+      MockURLProtocol.stubError(method: "getBalance", error: URLError(.badServerResponse))
+      MockURLProtocol.stubError(method: "getMinimumBalanceForRentExemption", error: URLError(.badServerResponse))
+
+      let sponsored = try await makeComposer().composeWithdraw(
+        chainId: devnet,
+        ownerAddress: owner,
+        collateralAddress: collateral,
+        mintAddress: mint,
+        recipientAddress: owner,
+        amountBaseUnits: 1,
+        adminSignature: adminSignature,
+        sponsoredFees: true,
+        sponsoredRent: true
+      )
+      #expect(sponsored.createsRecipientAccount)
+      #expect(!MockURLProtocol.recordedMethods.contains("getBalance"))
+      #expect(!MockURLProtocol.recordedMethods.contains("getMinimumBalanceForRentExemption"))
+
+      MockURLProtocol.stub(method: "getBalance", result: ["value": 1_000_000_000])
+      MockURLProtocol.stub(method: "getMinimumBalanceForRentExemption", result: 1_488_440)
+      let selfPaid = try await makeComposer().composeWithdraw(
+        chainId: devnet,
+        ownerAddress: owner,
+        collateralAddress: collateral,
+        mintAddress: mint,
+        recipientAddress: owner,
+        amountBaseUnits: 1,
+        adminSignature: adminSignature
+      )
+      #expect(sponsored.transaction == selfPaid.transaction)
+    }
+  }
+
+  @Test("a sponsored provider's withdrawal skips the rent only when the provider also sponsors rent; a preparation never does")
+  func testManagerCombinesTheTwoFlags() async throws {
+    try await MockURLProtocol.withInstalled {
+      try stubRecipientWithoutTokenAccount()
+      MockURLProtocol.stub(method: "getBalance", result: ["value": 0]) // a zero-SOL wallet
+      let turnkey = MockTurnkey(wallets: [MockTurnkey.dualCurveWallet(solanaAddress: owner)])
+      let client = turnkey.turnkeyClient as! MockTurnkeyClient
+      client.sendTransactionStatusQueue = [.solanaIncluded(signature: "sig-1"), .solanaIncluded(signature: "sig-2")]
+      let addresses = RainWithdrawAddresses(
+        proxyAddress: collateral, controllerAddress: collateral, tokenAddress: mint, recipientAddress: owner
+      )
+      let configs: [NetworkConfig] = [.testConfig(chainId: SolanaChains.devnet, rpcUrl: Self.rpcUrl)]
+
+      let (feesOnly, _, _) = TestManagers.turnkeyManager(turnkey: turnkey, configs: configs, sponsorGas: true)
+      await #expect(throws: RainError.insufficientFunds(required: "", available: "")) {
+        _ = try await feesOnly.withdrawCollateral(
+          chainId: devnet, addresses: addresses, amount: Decimal(string: "0.000001")!, decimals: 6,
+          adminSignature: adminSignature
+        )
+      }
+
+      let (both, _, _) = TestManagers.turnkeyManager(
+        turnkey: turnkey, configs: configs, sponsorGas: true, sponsorRent: true
+      )
+      let signature = try await both.withdrawCollateral(
+        chainId: devnet, addresses: addresses, amount: Decimal(string: "0.000001")!, decimals: 6,
+        adminSignature: adminSignature
+      )
+      #expect(signature == "sig-1")
+
+      await #expect(throws: RainError.insufficientFunds(required: "", available: "")) {
+        _ = try await both.prepareWithdrawal(
+          chainId: devnet, addresses: addresses, amount: Decimal(string: "0.000001")!, decimals: 6,
           adminSignature: adminSignature
         )
       }

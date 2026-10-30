@@ -73,6 +73,25 @@ struct TurnkeySponsorshipTests {
     #expect(!selfPaid.sponsorsFees(chainId: 1))
   }
 
+  @Test("rent is sponsored only on a Solana chain Turnkey broadcasts to, with both flags on")
+  func sponsorsRentNeedsBothFlagsAndSolana() {
+    func adapter(sponsorGas: Bool, sponsorRent: Bool) -> TurnkeyWalletProviderAdapter {
+      TurnkeyWalletProviderAdapter(
+        turnkey: MockTurnkey(), networkConfigs: TestFixtures.configs(),
+        sponsorGas: sponsorGas, sponsorRent: sponsorRent, chainReader: MockChainReader()
+      )
+    }
+    let both = adapter(sponsorGas: true, sponsorRent: true)
+    #expect(both.sponsorsRent(chainId: RainChain.solanaMainnet))
+    #expect(both.sponsorsRent(chainId: RainChain.solanaDevnet))
+    #expect(!both.sponsorsRent(chainId: RainChain.solanaTestnet), "not a broadcast cluster")
+    #expect(!both.sponsorsRent(chainId: 1), "rent is a Solana concept")
+
+    #expect(!adapter(sponsorGas: false, sponsorRent: true).sponsorsRent(chainId: RainChain.solanaMainnet),
+            "rent is pre-funded inside a sponsored send only")
+    #expect(!adapter(sponsorGas: true, sponsorRent: false).sponsorsRent(chainId: RainChain.solanaMainnet))
+  }
+
   // MARK: - Sponsored EVM send
 
   @Test("a sponsored send is a minimal payload carrying the gas-station nonce, with no chain RPC")
@@ -191,6 +210,47 @@ struct TurnkeySponsorshipTests {
 
     let sol = TurnkeyWalletProviderAdapter.sendFailure(from: status(.solanaRevertedOnChain()), fallbackMessage: "f")
     #expect(sol?.caseIdentifier == "transactionSimulationFailed")
+  }
+
+  @Test("a Solana lamport shortfall in a failed status is insufficientFunds, with the System Program's amounts when it logged them")
+  func sendFailureSolanaShortfall() {
+    func status(_ fixture: MockTurnkeyClient.StatusFixture) -> TGetSendTransactionStatusResponse {
+      MockTurnkeyClient.statusResponse(fixture)
+    }
+
+    let runtime = TurnkeyWalletProviderAdapter.sendFailure(
+      from: status(.solanaLamportShortfall(transactionErrorJson: #"{"InsufficientFundsForRent":{"account_index":1}}"#)),
+      fallbackMessage: "f"
+    )
+    #expect(runtime == .insufficientFunds(required: "", available: ""))
+
+    let transfer = TurnkeyWalletProviderAdapter.sendFailure(
+      from: status(.solanaLamportShortfall(
+        transactionErrorJson: #"{"InstructionError":[0,{"Custom":1}]}"#,
+        logs: [
+          "Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL invoke [1]",
+          "Program 11111111111111111111111111111111 invoke [2]",
+          "Transfer: insufficient lamports 0, need 1488440",
+          "Program 11111111111111111111111111111111 failed: custom program error: 0x1",
+        ]
+      )),
+      fallbackMessage: "f"
+    )
+    guard case .insufficientFunds(let required, let available) = transfer else {
+      Issue.record("expected insufficientFunds, got \(String(describing: transfer))")
+      return
+    }
+    #expect(required == "0.00148844")
+    #expect(available == "0")
+
+    let revert = TurnkeyWalletProviderAdapter.sendFailure(
+      from: status(.solanaLamportShortfall(
+        transactionErrorJson: #"{"InstructionError":[0,{"Custom":1}]}"#,
+        logs: ["Program log: Transfer: insufficient lamports 0, need 1488440"]
+      )),
+      fallbackMessage: "f"
+    )
+    #expect(revert?.caseIdentifier == "transactionSimulationFailed")
   }
 
   // MARK: - Send gating

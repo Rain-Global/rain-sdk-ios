@@ -24,6 +24,18 @@ struct SolanaRpcClientTests {
     }
   }
 
+  @Test("getMinimumBalanceForRentExemption asks for the account size and parses a bare result")
+  func minimumBalanceForRentExemption() async throws {
+    try await MockURLProtocol.withInstalled {
+      MockURLProtocol.interceptedHosts = [Self.host]
+      MockURLProtocol.stub(method: "getMinimumBalanceForRentExemption", result: 1_488_440)
+      let client = makeClient()
+      let rent = try await client.getMinimumBalanceForRentExemption(chainId: SolanaChains.mainnet, dataLength: 165)
+      #expect(rent == BigUInt(1_488_440))
+      #expect(MockURLProtocol.recordedParams.last?.first as? Int == 165)
+    }
+  }
+
   @Test("getLatestBlockhash parses result.value.blockhash")
   func latestBlockhash() async throws {
     try await MockURLProtocol.withInstalled {

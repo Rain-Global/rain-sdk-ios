@@ -245,10 +245,11 @@ public struct RainWalletConfig: Sendable {
   /// gas-sponsored — transfers, collateral withdrawals, Auth Pull approvals alike: the backend
   /// builds and pays the network fee and the user needs no native gas token. Fee estimates
   /// still quote the on-chain cost — what the user saves. Sponsorship cost passes through to
-  /// the partner. Solana sends are sponsored
-  /// too (network fee only — rent for a first-time recipient's token account stays the sender's).
-  /// Set false where sponsorship is not enabled for the backend organization, or the backend
-  /// rejects the sends.
+  /// the partner. Solana sends are sponsored too, including the rent of a first-time
+  /// recipient's token account when Rain's backend organization funds it (Rain's setting, not
+  /// yours: until it is on, such a send from a wallet holding no SOL fails after signing with
+  /// `insufficientFunds`). Set false where sponsorship is not enabled for the backend
+  /// organization, or the backend rejects the sends.
   public let sponsorGas: Bool
   /// Expiry/refresh/retry behavior for the session guarding every wallet call.
   public let sessionPolicy: RainWalletSessionPolicy
@@ -324,6 +325,9 @@ public struct RainProvider: ProviderDescriptor {
         rpId: config.passkeyDomain,
         sessionPolicy: config.sessionPolicy.backingPolicy,
         sponsorGas: config.sponsorGas,
+        // Whether rent is funded is Rain's dashboard switch, which a partner can neither see nor
+        // set, and a flip has to reach installed apps without a release.
+        sponsorRent: true,
         onSessionExpired: config.onSessionExpired
       )
     )

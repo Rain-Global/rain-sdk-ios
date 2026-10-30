@@ -30,6 +30,12 @@ public protocol WalletProvider: Sendable {
   /// a provider may sponsor only where it can broadcast. Defaults to false.
   func sponsorsFees(chainId: Int) -> Bool
 
+  /// True when the provider's organization also funds the rent of a token account a Solana send
+  /// on `chainId` creates, so core does not demand that rent from the sender before composing.
+  /// Only consulted when `sponsorsFees(chainId:)` is true: the sponsor pre-funds rent inside a
+  /// sponsored send only, so core combines the two. Defaults to false.
+  func sponsorsRent(chainId: Int) -> Bool
+
   /// Sends a transaction; returns the transaction hash.
   func sendTransaction(
     chainId: Int,
@@ -82,5 +88,8 @@ public extension WalletProvider {
 
   /// The wallet pays its own fees unless the provider says otherwise.
   func sponsorsFees(chainId: Int) -> Bool { false }
+
+  /// The sender pays a created token account's rent unless the provider says otherwise.
+  func sponsorsRent(chainId: Int) -> Bool { false }
 }
 

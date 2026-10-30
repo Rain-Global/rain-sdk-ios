@@ -85,6 +85,12 @@ struct RainWalletTests {
     #expect(RainProvider(RainWalletConfig(sponsorGas: false)).capabilities == [.export, .multiChain])
   }
 
+  @Test("the backing provider always sponsors rent: whether it is funded is Rain's switch, not the partner's")
+  func testBackingAlwaysSponsorsRent() {
+    #expect(RainProvider(RainWalletConfig()).backing.sponsorsRentWhenSponsoringGas)
+    #expect(RainProvider(RainWalletConfig(sponsorGas: false)).backing.sponsorsRentWhenSponsoringGas)
+  }
+
   // MARK: - Configuration wiring
 
   @Test("the environment maps to Rain's hosts, production by default")
